@@ -1,0 +1,14 @@
+/target
+# Never commit a real vault, a container, or its key material.
+*.hc
+*.ddv
+*.ddv.bak*
+*.ddmeta
+*.key
+config.json
+
+# The fingerprint of a locally built binary. Rust builds are not reproducible
+# byte for byte, so anyone else's build hashes differently -- committing this
+# would state a fact that is false for every clone. It belongs beside a
+# released binary, not in the source.
+SHA256SUMS.txt

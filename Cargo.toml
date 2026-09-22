@@ -1,0 +1,42 @@
+[package]
+name = "deep-defense"
+version = "1.0.0"
+edition = "2021"
+description = "A VeraCrypt-backed password manager with a second, independent encryption layer"
+license = "MIT"
+
+[[bin]]
+name = "deep-defense"
+path = "src/main.rs"
+
+[dependencies]
+aes-gcm = "0.11.1"
+arboard = "3.6.1"
+argon2 = "0.6.0"
+base64 = "0.23.1"
+chacha20poly1305 = "0.11.0"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
+dirs = "7.0.0"
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "accesskit", "links"] }
+egui = "0.36.2"
+getrandom = "0.4.3"
+hkdf = "0.13.0"
+hmac = "0.13.0"
+rfd = { version = "0.17.2", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha1 = "0.11.0"
+sha2 = "0.11.0"
+subtle = "2.6.1"
+windows-sys = { version = "0.61.2", features = ["Win32_System_Diagnostics_Debug", "Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Globalization", "Win32_System_Memory", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+zeroize = "1.9.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+# `panic = "abort"` is deliberately NOT set. Aborting skips Drop, and Drop is
+# exactly what zeroizes the master key and the decrypted entries - a panic
+# would leave them sitting in memory for whatever reads the process next.
+panic = "unwind"
