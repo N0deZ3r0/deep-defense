@@ -1,0 +1,12 @@
+# Build for the GNU target without every command having to say so.
+#
+# The alternative is `--target x86_64-pc-windows-gnu` on every cargo
+# invocation, in the build script, in both CI workflows and in whatever a
+# contributor types from memory. One of those would be forgotten, and the
+# failure would be a linker error about the icon object having the wrong ABI —
+# which reads like a problem with the icon.
+#
+# The cost is that artefacts land under target/x86_64-pc-windows-gnu/ rather
+# than target/, which build.ps1 and the workflows account for.
+[build]
+target = "x86_64-pc-windows-gnu"

@@ -399,4 +399,103 @@ mod tests {
         let mut data = VaultData::default();
         assert!(from_csv(&mut data, "").is_err());
     }
+
+    // ------------------------------------------------- the whole way round
+
+    fn a_full_entry() -> crate::model::Entry {
+        let mut entry = crate::model::Entry::new("Bank");
+        entry.username = "me@example.com".into();
+        entry.url = "https://bank.example".into();
+        entry.notes = "line one\nline two, with a comma".into();
+        entry.tags = vec!["money".into(), "важное".into()];
+        entry.totp_secret = "JBSWY3DPEHPK3PXP".into();
+        entry.fields.push(crate::model::CustomField {
+            name: "PIN".into(),
+            value: "4821".into(),
+            secret: true,
+        });
+        entry.attachments.push(crate::model::Attachment::new(
+            "scan.txt",
+            b"the contents of a document",
+        ));
+        // Two set_password calls, so there is a history to lose or keep.
+        entry.set_password("the old one".into());
+        entry.set_password("the current one".into());
+        entry
+    }
+
+    #[test]
+    fn json_carries_everything_back() {
+        let mut original = VaultData::default();
+        original.entries.push(a_full_entry());
+
+        let text = to_json(&original).unwrap();
+        let mut restored = VaultData::default();
+        let report = from_json(&mut restored, &text).unwrap();
+        assert_eq!(report.added, 1);
+
+        let entry = &restored.entries[0];
+        assert_eq!(entry.name, "Bank");
+        assert_eq!(entry.username, "me@example.com");
+        assert_eq!(entry.url, "https://bank.example");
+        assert_eq!(entry.notes, "line one\nline two, with a comma");
+        assert_eq!(entry.tags, vec!["money".to_string(), "важное".to_string()]);
+        assert_eq!(entry.password, "the current one");
+        assert_eq!(entry.totp_secret, "JBSWY3DPEHPK3PXP");
+        assert_eq!(entry.fields.len(), 1, "custom fields survive JSON");
+        assert_eq!(entry.fields[0].value, "4821");
+        assert!(entry.fields[0].secret);
+        assert_eq!(entry.attachments.len(), 1, "attachments survive JSON");
+        assert_eq!(entry.history.len(), 1, "the password history survives");
+        assert_eq!(entry.history[0].password, "the old one");
+    }
+
+    #[test]
+    fn csv_carries_what_a_csv_can_and_the_rest_is_lost_on_purpose() {
+        // Said out loud in the interface, and asserted here so it stays true:
+        // a spreadsheet has no column for a file or a password's history.
+        let mut original = VaultData::default();
+        original.entries.push(a_full_entry());
+
+        let text = to_csv(&original);
+        let mut restored = VaultData::default();
+        from_csv(&mut restored, &text).unwrap();
+
+        let entry = &restored.entries[0];
+        assert_eq!(entry.name, "Bank");
+        assert_eq!(entry.username, "me@example.com");
+        assert_eq!(entry.password, "the current one");
+        assert_eq!(entry.notes, "line one\nline two, with a comma",
+                   "a newline and a comma inside a field must survive quoting");
+        assert!(entry.attachments.is_empty(), "documented loss");
+        assert!(entry.history.is_empty(), "documented loss");
+    }
+
+    #[test]
+    fn importing_the_same_export_twice_adds_nothing_the_second_time() {
+        // The one outcome an import must never produce: a vault with every
+        // entry in it twice.
+        let mut original = VaultData::default();
+        original.entries.push(a_full_entry());
+        let text = to_json(&original).unwrap();
+
+        let mut restored = VaultData::default();
+        assert_eq!(from_json(&mut restored, &text).unwrap().added, 1);
+        let second = from_json(&mut restored, &text).unwrap();
+        assert_eq!(second.added, 0);
+        assert_eq!(second.duplicates, 1);
+        assert_eq!(restored.entries.len(), 1);
+    }
+
+    #[test]
+    fn an_export_of_nothing_still_reads_back_as_nothing() {
+        let empty = VaultData::default();
+        let mut restored = VaultData::default();
+        from_json(&mut restored, &to_json(&empty).unwrap()).unwrap();
+        assert!(restored.entries.is_empty());
+
+        let mut from_table = VaultData::default();
+        from_csv(&mut from_table, &to_csv(&empty)).unwrap();
+        assert!(from_table.entries.is_empty());
+    }
 }

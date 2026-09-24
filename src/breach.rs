@@ -798,4 +798,67 @@ mod tests {
         assert!(!catalogue.contains("password"));
         assert!(!catalogue.contains("anything"));
     }
+
+    // --------------------------------------------------- through the disk
+
+    #[test]
+    fn an_imported_list_is_still_there_after_a_restart() {
+        // Everything above this point builds a catalogue in memory. The path
+        // that actually matters is the one that writes it and reads it back,
+        // and it was the one with no test.
+        let _home = crate::config::test_home::TestHome::new("breach-restart");
+
+        let mut catalogue = Catalogue::bundled_only();
+        catalogue.import("a-password-of-my-own\nanother-one\n").unwrap();
+        catalogue.save_user().unwrap();
+
+        let reopened = Catalogue::load();
+        assert!(reopened.contains("a-password-of-my-own"));
+        assert!(reopened.contains("another-one"));
+        assert!(reopened.contains("qwerty"), "and the bundled list as well");
+        assert_eq!(reopened.user().map(|f| f.count()), Some(2));
+    }
+
+    #[test]
+    fn forgetting_the_imported_list_removes_it_from_the_disk_too() {
+        let _home = crate::config::test_home::TestHome::new("breach-forget");
+
+        let mut catalogue = Catalogue::bundled_only();
+        catalogue.import("a-password-of-my-own\n").unwrap();
+        catalogue.save_user().unwrap();
+        assert!(user_path().is_file());
+
+        catalogue.forget_user().unwrap();
+        assert!(!user_path().exists(), "a forgotten list must not be left behind");
+        assert!(!catalogue.contains("a-password-of-my-own"));
+        assert!(catalogue.contains("qwerty"), "the bundled list stays");
+
+        // Forgetting a list that is not there is not an error: the button is
+        // allowed to be pressed twice.
+        catalogue.forget_user().unwrap();
+    }
+
+    #[test]
+    fn a_damaged_list_on_disk_costs_the_list_and_nothing_else() {
+        // A filter that will not load is a reason to check fewer passwords,
+        // not a reason to refuse to run a password manager.
+        let _home = crate::config::test_home::TestHome::new("breach-damaged");
+        crate::config::ensure_app_dir().unwrap();
+        std::fs::write(user_path(), b"this is not a filter").unwrap();
+
+        let catalogue = Catalogue::load();
+        assert!(catalogue.user().is_none(), "the damaged list is dropped");
+        assert!(catalogue.contains("qwerty"), "the bundled one still answers");
+        assert!(!catalogue.contains("a-password-nobody-has-used"));
+    }
+
+    #[test]
+    fn saving_with_nothing_imported_writes_nothing() {
+        let _home = crate::config::test_home::TestHome::new("breach-nosave");
+        Catalogue::bundled_only().save_user().unwrap();
+        assert!(
+            !user_path().exists(),
+            "an empty save must not leave a file that load would then read"
+        );
+    }
 }

@@ -49,16 +49,12 @@ jobs:
           Write-Host "Using $mingw"
           $mingw | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
-      - name: Install the lint
-        # rust-toolchain.toml installs the channel on the first cargo call, but
-        # clippy is a separate component and is not part of the minimal profile.
-        run: rustup component add clippy
-
       - name: Record what built this
         shell: pwsh
         run: |
           rustc --version
           cargo --version
+          rustup show active-toolchain
           gcc --version | Select-Object -First 1
           windres --version | Select-Object -First 1
 
@@ -80,8 +76,8 @@ jobs:
       - name: Fingerprint
         shell: pwsh
         run: |
-          $hash = (Get-FileHash -Algorithm SHA256 target\release\deep-defense.exe).Hash.ToLower()
-          $size = [math]::Round((Get-Item target\release\deep-defense.exe).Length / 1MB, 1)
+          $hash = (Get-FileHash -Algorithm SHA256 target\x86_64-pc-windows-gnu\release\deep-defense.exe).Hash.ToLower()
+          $size = [math]::Round((Get-Item target\x86_64-pc-windows-gnu\release\deep-defense.exe).Length / 1MB, 1)
           Write-Output "deep-defense.exe  $size MB"
           Write-Output "sha256  $hash"
           # Rust builds are not reproducible byte for byte, so this will differ
@@ -93,7 +89,7 @@ jobs:
         with:
           name: deep-defense-windows-${{ github.sha }}
           path: |
-            target/release/deep-defense.exe
+            target/x86_64-pc-windows-gnu/release/deep-defense.exe
           # Long enough to fetch a build from a pull request while reviewing it,
           # short enough not to leave unsigned binaries lying around for months.
           retention-days: 14

@@ -69,6 +69,6 @@ jobs:
           # --clobber so re-running this on a tag replaces the assets rather
           # than failing half way and leaving a release with one of the two.
           gh release upload $tag `
-            target/release/deep-defense.exe `
+            target/x86_64-pc-windows-gnu/release/deep-defense.exe `
             SHA256SUMS.txt `
             --clobber --repo ${{ github.repository }}

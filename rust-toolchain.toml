@@ -1,2 +1,21 @@
+# The GNU target, not a GNU-hosted channel.
+#
+# This file used to say `channel = "stable-x86_64-pc-windows-gnu"`, which
+# pinned the host triple inside the channel name. Current rustup refuses that
+# outright — "target tuple in channel name" — so the project would not build
+# for anyone whose rustup was newer than the author's, which is every new
+# contributor eventually.
+#
+# What the build actually needs is the *target*: rustc must emit GNU-ABI
+# objects, because build.rs turns the icon into one with windres and ar, and
+# those are GNU tools. Which toolchain does the emitting does not matter, so
+# the host is left alone and the target is requested explicitly.
+#
+# `.cargo/config.toml` then makes that target the default, so no command has to
+# carry `--target` and a plain `cargo test` does the right thing.
 [toolchain]
-channel = "stable-x86_64-pc-windows-gnu"
+channel = "stable"
+targets = ["x86_64-pc-windows-gnu"]
+# Installed with the toolchain rather than added in CI, so the lint the project
+# is held to is the same one a contributor gets without being told about it.
+components = ["clippy"]

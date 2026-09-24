@@ -73,6 +73,23 @@ Get a portable MinGW-w64 (no installer, no administrator rights):
 '@
 }
 
+# --- a space in the path ---------------------------------------------------
+# dlltool builds the command line for the assembler without quoting it, so a
+# space anywhere above the build directory makes it ask for a file whose name
+# begins after the space. rustc reaches dlltool through raw-dylib, which the
+# windows-* crates use, so this is not avoidable by changing anything here.
+#
+# It is a defect in binutils, not in this project, and the only thing this
+# script can do about it is build somewhere else and say so.
+if ($PSScriptRoot -match ' ') {
+    if (-not $env:CARGO_TARGET_DIR) {
+        $env:CARGO_TARGET_DIR = Join-Path $env:LOCALAPPDATA 'deep-defense-build'
+        Write-Host "The project path contains a space, which dlltool cannot handle." -ForegroundColor Yellow
+        Write-Host "Building into $env:CARGO_TARGET_DIR instead." -ForegroundColor Yellow
+        Write-Host ''
+    }
+}
+
 # --- go --------------------------------------------------------------------
 if ($Test) {
     & cargo test
@@ -89,7 +106,10 @@ if ($Dev) {
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $outDir = if ($Dev) { 'debug' } else { 'release' }
-$exe = Join-Path $PSScriptRoot "target\$outDir\deep-defense.exe"
+$targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $PSScriptRoot 'target' }
+# .cargo/config.toml builds for the GNU target, so cargo puts the artefacts
+# under the triple rather than directly in the target directory.
+$exe = Join-Path $targetRoot "x86_64-pc-windows-gnu\$outDir\deep-defense.exe"
 if (Test-Path $exe) {
     $sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
     Write-Host ''
