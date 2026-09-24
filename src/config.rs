@@ -265,3 +265,219 @@ pub fn default_vault_path() -> PathBuf {
         .join("DeepDefense")
         .join(VAULT_FILENAME)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::test_home::TestHome;
+    use crate::i18n::Lang;
+    use crate::ui::theme::Appearance;
+
+    #[test]
+    fn with_no_file_at_all_the_defaults_are_used() {
+        let _home = TestHome::new("cfg-absent");
+        assert!(!Config::path().exists());
+        let config = Config::load().expect("an absent file is not an error");
+        assert_eq!(config.clipboard_seconds, Config::default().clipboard_seconds);
+    }
+
+    #[test]
+    fn every_setting_survives_a_round_trip() {
+        let home = TestHome::new("cfg-roundtrip");
+        let mirror = home.join("elsewhere");
+
+        let mut written = Config::default();
+        written.use_container = true;
+        written.vault_path = home.join("vault.ddv");
+        written.container_path = home.join("box.hc");
+        written.keyfiles = vec![home.join("a.key"), home.join("b.key")];
+        written.pim = 485;
+        written.clipboard_seconds = 42;
+        written.autolock_seconds = 900;
+        written.lock_on_screen_lock = false;
+        written.mask_passwords = false;
+        written.language = Lang::En;
+        written.appearance = Appearance::Light;
+        written.encryption = "AES(Twofish(Serpent))".into();
+        written.hash_algo = "sha256".into();
+        written.warn_password_age_days = 90;
+        written.backup_mirror = Some(mirror.clone());
+        written.kdf.t_cost = 5;
+        written.save().unwrap();
+
+        let read = Config::load().unwrap();
+        assert_eq!(read.use_container, true);
+        assert_eq!(read.vault_path, written.vault_path);
+        assert_eq!(read.container_path, written.container_path);
+        assert_eq!(read.keyfiles, written.keyfiles);
+        assert_eq!(read.pim, 485);
+        assert_eq!(read.clipboard_seconds, 42);
+        assert_eq!(read.autolock_seconds, 900);
+        assert_eq!(read.lock_on_screen_lock, false);
+        assert_eq!(read.mask_passwords, false);
+        assert_eq!(read.language, Lang::En);
+        assert_eq!(read.appearance, Appearance::Light);
+        assert_eq!(read.encryption, "AES(Twofish(Serpent))");
+        assert_eq!(read.hash_algo, "sha256");
+        assert_eq!(read.warn_password_age_days, 90);
+        assert_eq!(read.backup_mirror, Some(mirror));
+        assert_eq!(read.kdf.t_cost, 5);
+    }
+
+    /// The regression that matters most in this file.
+    ///
+    /// Notepad and PowerShell's `Out-File -Encoding utf8` both write a byte
+    /// order mark, serde_json refuses it, and the caller answers a load error
+    /// by falling back to defaults — so one invisible character silently reset
+    /// the language, the theme and the vault path at once. It was found by
+    /// noticing a screenshot came out Russian when English was asked for.
+    #[test]
+    fn a_byte_order_mark_does_not_reset_every_setting() {
+        let _home = TestHome::new("cfg-bom");
+        let mut written = Config::default();
+        written.clipboard_seconds = 37;
+        written.language = Lang::En;
+        written.save().unwrap();
+
+        let text = std::fs::read_to_string(Config::path()).unwrap();
+        std::fs::write(Config::path(), format!("\u{feff}{text}")).unwrap();
+
+        let read = Config::load().expect("a BOM must not make the file unreadable");
+        assert_eq!(read.clipboard_seconds, 37, "the settings survived the BOM");
+        assert_eq!(read.language, Lang::En);
+    }
+
+    #[test]
+    fn a_broken_file_is_reported_rather_than_silently_replaced() {
+        // Returning the defaults here would look like the program forgetting
+        // everything for no reason. The caller shows the error instead.
+        let _home = TestHome::new("cfg-broken");
+        std::fs::create_dir_all(Config::path().parent().unwrap()).unwrap();
+        std::fs::write(Config::path(), "{ this is not json").unwrap();
+
+        let err = Config::load().unwrap_err();
+        let message = format!("{err}");
+        assert!(message.contains("config.json"), "names the file: {message}");
+        assert!(message.contains("Delete it"), "says what to do: {message}");
+    }
+
+    #[test]
+    fn a_setting_this_version_does_not_know_is_ignored() {
+        // A file written by a newer build must not stop an older one from
+        // starting, or a downgrade would cost the user their settings.
+        let _home = TestHome::new("cfg-forward");
+        std::fs::create_dir_all(Config::path().parent().unwrap()).unwrap();
+        std::fs::write(
+            Config::path(),
+            r#"{"clipboard_seconds": 21, "something_from_the_future": [1, 2, 3]}"#,
+        )
+        .unwrap();
+
+        let read = Config::load().unwrap();
+        assert_eq!(read.clipboard_seconds, 21);
+    }
+
+    #[test]
+    fn a_setting_added_since_the_file_was_written_takes_its_default() {
+        // The mirror directory did not exist in the first release; a file from
+        // then must still load, with mirroring simply off.
+        let _home = TestHome::new("cfg-backward");
+        std::fs::create_dir_all(Config::path().parent().unwrap()).unwrap();
+        std::fs::write(Config::path(), r#"{"clipboard_seconds": 19}"#).unwrap();
+
+        let read = Config::load().unwrap();
+        assert_eq!(read.clipboard_seconds, 19);
+        assert_eq!(read.backup_mirror, None);
+        assert_eq!(read.language, Config::default().language);
+    }
+
+    #[test]
+    fn implausible_timeouts_are_refused() {
+        let mut config = Config::default();
+        config.clipboard_seconds = 0;
+        assert!(config.validate().is_err(), "zero would clear instantly");
+
+        config = Config::default();
+        config.clipboard_seconds = 100_000;
+        assert!(config.validate().is_err(), "a day on the clipboard");
+
+        config = Config::default();
+        config.autolock_seconds = 1;
+        assert!(config.validate().is_err(), "unusable, not secure");
+
+        config = Config::default();
+        config.autolock_seconds = 999_999;
+        assert!(config.validate().is_err());
+
+        assert!(Config::default().validate().is_ok(), "the defaults must pass");
+    }
+
+    #[test]
+    fn a_missing_keyfile_is_refused_before_it_is_needed() {
+        // Caught at validation rather than at unlock, where the failure would
+        // look like a wrong password.
+        let home = TestHome::new("cfg-keyfile");
+        let mut config = Config::default();
+        config.keyfiles = vec![home.join("never-existed.key")];
+        let err = config.validate().unwrap_err();
+        assert!(format!("{err}").contains("missing"));
+    }
+
+    /// The claim in this file's own doc comment, under test.
+    #[test]
+    fn the_settings_file_holds_no_secret() {
+        let _home = TestHome::new("cfg-nosecrets");
+        let config = Config::default();
+        config.save().unwrap();
+        let text = std::fs::read_to_string(Config::path()).unwrap();
+
+        // `container_meta` may hold a *wrapped* volume password; nothing else
+        // in this file is allowed to resemble a secret at all.
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let object = parsed.as_object().expect("a settings object");
+        for (key, value) in object {
+            if key == "container_meta" {
+                continue;
+            }
+            assert!(
+                !key.contains("password") && !key.contains("secret") && !key.contains("key_"),
+                "a settings field called {key} looks like it holds a secret"
+            );
+            assert!(
+                !value.to_string().to_lowercase().contains("password"),
+                "the value of {key} mentions a password"
+            );
+        }
+    }
+
+    #[test]
+    fn saving_creates_the_directory_it_needs() {
+        let home = TestHome::new("cfg-mkdir");
+        let nested = home.join("not").join("there").join("yet");
+        std::env::set_var("DEEP_DEFENSE_HOME", &nested);
+        let outcome = Config::default().save();
+        std::env::set_var("DEEP_DEFENSE_HOME", home.path());
+        outcome.expect("save must create the settings directory");
+        assert!(nested.join("config.json").is_file());
+    }
+
+    #[test]
+    fn the_home_override_is_honoured() {
+        let home = TestHome::new("cfg-home");
+        assert_eq!(app_dir(), home.path());
+        assert!(Config::path().starts_with(home.path()));
+    }
+
+    #[test]
+    fn a_blank_home_override_falls_back_to_the_real_profile() {
+        // An empty environment variable is how a shell passes "unset", and
+        // treating it as a path would put the settings in the current
+        // directory.
+        let home = TestHome::new("cfg-blank");
+        std::env::set_var("DEEP_DEFENSE_HOME", "   ");
+        let resolved = app_dir();
+        std::env::set_var("DEEP_DEFENSE_HOME", home.path());
+        assert_ne!(resolved, std::path::PathBuf::from("   "));
+        assert!(resolved.ends_with(APP_NAME));
+    }
+}

@@ -137,3 +137,151 @@ impl Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::{EN, RU};
+
+    /// One of every variant, so a new one cannot be added without deciding
+    /// what it says.
+    fn one_of_each() -> Vec<Error> {
+        vec![
+            Error::Authentication,
+            Error::crypto("the tag did not verify"),
+            Error::format("that is not a share"),
+            Error::vault("the vault is not open"),
+            Error::EntryNotFound("Bank".into()),
+            Error::EntryExists("Bank".into()),
+            Error::veracrypt("the volume did not mount"),
+            Error::Rollback {
+                on_disk: 7,
+                expected: 11,
+            },
+            Error::config("the timeout is out of range"),
+            Error::io(
+                std::path::PathBuf::from("C:/vault.ddv"),
+                std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_error_says_something_in_both_languages() {
+        for error in one_of_each() {
+            for (language, strings) in [("EN", &EN), ("RU", &RU)] {
+                let text = error.localized(strings);
+                assert!(
+                    !text.trim().is_empty(),
+                    "{error:?} says nothing in {language}"
+                );
+                assert!(
+                    !text.contains("{}"),
+                    "{error:?} left a placeholder unfilled in {language}: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_languages_do_not_hand_back_the_same_sentence() {
+        // A missing match arm, or a template copied from one block to the
+        // other, shows up as an English sentence in a Russian interface — and
+        // nothing else in the build would notice.
+        for error in one_of_each() {
+            let english = error.localized(&EN);
+            let russian = error.localized(&RU);
+            if matches!(error, Error::Vault(_)) {
+                // Deliberately the caller's own message, which is not
+                // translated; see `localized`.
+                assert_eq!(english, russian);
+                continue;
+            }
+            assert_ne!(
+                english, russian,
+                "{error:?} reads identically in both languages"
+            );
+            assert!(
+                russian.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c)),
+                "{error:?} has no Cyrillic in its Russian form: {russian}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_the_error_is_about_survives_translation() {
+        assert!(Error::EntryNotFound("Bank".into())
+            .localized(&RU)
+            .contains("Bank"));
+        assert!(Error::EntryExists("Bank".into())
+            .localized(&RU)
+            .contains("Bank"));
+
+        let rollback = Error::Rollback {
+            on_disk: 7,
+            expected: 11,
+        };
+        let text = rollback.localized(&RU);
+        assert!(text.contains('7') && text.contains("11"), "{text}");
+
+        let io = Error::io(
+            std::path::PathBuf::from("C:/vault.ddv"),
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        );
+        assert!(io.localized(&RU).contains("vault.ddv"));
+    }
+
+    #[test]
+    fn display_stays_english_for_the_log() {
+        // Two audiences: `localized` is for the person, `Display` is for a log
+        // line or a panic message, which is read by whoever is debugging and
+        // is searched for in English.
+        let error = Error::EntryNotFound("Bank".into());
+        let printed = format!("{error}");
+        assert!(printed.contains("Bank"));
+        assert!(
+            !printed.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c)),
+            "a log line came out in Russian: {printed}"
+        );
+    }
+
+    #[test]
+    fn only_a_second_attempt_worth_making_is_retryable() {
+        // A wrong password or a volume that did not mount are worth another
+        // go; a broken file or a missing entry are not, and offering to retry
+        // them would be a lie.
+        assert!(Error::Authentication.is_retryable());
+        assert!(Error::veracrypt("did not mount").is_retryable());
+
+        assert!(!Error::format("not a share").is_retryable());
+        assert!(!Error::EntryNotFound("Bank".into()).is_retryable());
+        assert!(!Error::crypto("the tag did not verify").is_retryable());
+        assert!(!Error::Rollback {
+            on_disk: 1,
+            expected: 2
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn an_authentication_failure_says_nothing_about_which_slot() {
+        // The whole point of the hidden vault is that a wrong password cannot
+        // be told from a password belonging to a slot that does not exist.
+        for strings in [&EN, &RU] {
+            let text = Error::Authentication.localized(strings).to_lowercase();
+            for giveaway in ["slot", "hidden", "primary", "слот", "скрыт"] {
+                assert!(
+                    !text.contains(giveaway),
+                    "the refusal mentions {giveaway}: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_debug_line_is_still_useful() {
+        // Errors are logged with `{:?}` in places; it must name the variant.
+        assert!(format!("{:?}", Error::Authentication).contains("Authentication"));
+        assert!(format!("{:?}", Error::EntryNotFound("Bank".into())).contains("Bank"));
+    }
+}
