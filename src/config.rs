@@ -286,35 +286,40 @@ mod tests {
         let home = TestHome::new("cfg-roundtrip");
         let mirror = home.join("elsewhere");
 
-        let mut written = Config::default();
-        written.use_container = true;
-        written.vault_path = home.join("vault.ddv");
-        written.container_path = home.join("box.hc");
-        written.keyfiles = vec![home.join("a.key"), home.join("b.key")];
-        written.pim = 485;
-        written.clipboard_seconds = 42;
-        written.autolock_seconds = 900;
-        written.lock_on_screen_lock = false;
-        written.mask_passwords = false;
-        written.language = Lang::En;
-        written.appearance = Appearance::Light;
-        written.encryption = "AES(Twofish(Serpent))".into();
-        written.hash_algo = "sha256".into();
-        written.warn_password_age_days = 90;
-        written.backup_mirror = Some(mirror.clone());
-        written.kdf.t_cost = 5;
+        let written = Config {
+            use_container: true,
+            vault_path: home.join("vault.ddv"),
+            container_path: home.join("box.hc"),
+            keyfiles: vec![home.join("a.key"), home.join("b.key")],
+            pim: 485,
+            clipboard_seconds: 42,
+            autolock_seconds: 900,
+            lock_on_screen_lock: false,
+            mask_passwords: false,
+            language: Lang::En,
+            appearance: Appearance::Light,
+            encryption: "AES(Twofish(Serpent))".into(),
+            hash_algo: "sha256".into(),
+            warn_password_age_days: 90,
+            backup_mirror: Some(mirror.clone()),
+            kdf: KdfParams {
+                t_cost: 5,
+                ..KdfParams::default()
+            },
+            ..Config::default()
+        };
         written.save().unwrap();
 
         let read = Config::load().unwrap();
-        assert_eq!(read.use_container, true);
+        assert!(read.use_container);
         assert_eq!(read.vault_path, written.vault_path);
         assert_eq!(read.container_path, written.container_path);
         assert_eq!(read.keyfiles, written.keyfiles);
         assert_eq!(read.pim, 485);
         assert_eq!(read.clipboard_seconds, 42);
         assert_eq!(read.autolock_seconds, 900);
-        assert_eq!(read.lock_on_screen_lock, false);
-        assert_eq!(read.mask_passwords, false);
+        assert!(!read.lock_on_screen_lock);
+        assert!(!read.mask_passwords);
         assert_eq!(read.language, Lang::En);
         assert_eq!(read.appearance, Appearance::Light);
         assert_eq!(read.encryption, "AES(Twofish(Serpent))");
@@ -334,9 +339,11 @@ mod tests {
     #[test]
     fn a_byte_order_mark_does_not_reset_every_setting() {
         let _home = TestHome::new("cfg-bom");
-        let mut written = Config::default();
-        written.clipboard_seconds = 37;
-        written.language = Lang::En;
+        let written = Config {
+            clipboard_seconds: 37,
+            language: Lang::En,
+            ..Config::default()
+        };
         written.save().unwrap();
 
         let text = std::fs::read_to_string(Config::path()).unwrap();
@@ -393,21 +400,22 @@ mod tests {
 
     #[test]
     fn implausible_timeouts_are_refused() {
-        let mut config = Config::default();
-        config.clipboard_seconds = 0;
-        assert!(config.validate().is_err(), "zero would clear instantly");
+        let clipboard = |seconds| Config {
+            clipboard_seconds: seconds,
+            ..Config::default()
+        };
+        assert!(clipboard(0).validate().is_err(), "zero would clear instantly");
+        assert!(
+            clipboard(100_000).validate().is_err(),
+            "a day on the clipboard"
+        );
 
-        config = Config::default();
-        config.clipboard_seconds = 100_000;
-        assert!(config.validate().is_err(), "a day on the clipboard");
-
-        config = Config::default();
-        config.autolock_seconds = 1;
-        assert!(config.validate().is_err(), "unusable, not secure");
-
-        config = Config::default();
-        config.autolock_seconds = 999_999;
-        assert!(config.validate().is_err());
+        let autolock = |seconds| Config {
+            autolock_seconds: seconds,
+            ..Config::default()
+        };
+        assert!(autolock(1).validate().is_err(), "unusable, not secure");
+        assert!(autolock(999_999).validate().is_err());
 
         assert!(Config::default().validate().is_ok(), "the defaults must pass");
     }
@@ -417,8 +425,10 @@ mod tests {
         // Caught at validation rather than at unlock, where the failure would
         // look like a wrong password.
         let home = TestHome::new("cfg-keyfile");
-        let mut config = Config::default();
-        config.keyfiles = vec![home.join("never-existed.key")];
+        let config = Config {
+            keyfiles: vec![home.join("never-existed.key")],
+            ..Config::default()
+        };
         let err = config.validate().unwrap_err();
         assert!(format!("{err}").contains("missing"));
     }

@@ -31,19 +31,22 @@ jobs:
       # pipeline is a place worth keeping the list of things that can run
       # arbitrary code as short as it can be, and a caching action would save a
       # few minutes in exchange for another supply chain to trust.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Put MinGW on PATH
+      - name: Find the GNU toolchain
         shell: pwsh
         run: |
-          # rust-toolchain.toml pins the GNU host, and build.rs calls windres
-          # and ar directly to embed the icon, so the MSVC tools the runner
-          # defaults to are not enough. windows-latest ships MSYS2, whose
-          # mingw64 directory carries gcc, as, ar and windres together.
-          $mingw = 'C:\msys64\mingw64\bin'
-          if (-not (Test-Path (Join-Path $mingw 'as.exe'))) {
-            throw "The GNU assembler is not at $mingw. The runner image changed; build.ps1 lists the other places it looks."
+          # gcc links, and build.rs calls windres and ar to embed the icon, so
+          # the MSVC tools a Windows runner defaults to are not enough. The
+          # list of places to look is shared with build.ps1 rather than
+          # written out twice.
+          $mingw = & .\tools\find-mingw.ps1 2>$null
+          if (-not $mingw) {
+            Write-Host 'Not on the image; installing MinGW.'
+            choco install mingw -y --no-progress | Out-Null
+            $mingw = & .\tools\find-mingw.ps1
           }
+          Write-Host "Using $mingw"
           $mingw | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
       - name: Install the lint

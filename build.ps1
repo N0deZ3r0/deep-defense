@@ -53,13 +53,10 @@ if (Test-Path (Join-Path $selfContained 'dlltool.exe')) {
     $env:PATH = "$selfContained;$env:PATH"
 }
 
-# --- MinGW-w64 (provides as.exe) -------------------------------------------
-$mingwCandidates = @(
-    (Join-Path $env:USERPROFILE '.mingw-toolchain\mingw64\bin'),
-    'C:\mingw64\bin',
-    'C:\msys64\mingw64\bin'
-)
-$mingw = $mingwCandidates | Where-Object { Test-Path (Join-Path $_ 'as.exe') } | Select-Object -First 1
+# --- MinGW-w64 (provides as.exe, ar.exe, windres.exe, gcc.exe) -------------
+# The list of places to look lives in one script, shared with the CI
+# workflows, so a toolchain that works here works there too.
+$mingw = & (Join-Path $PSScriptRoot 'tools\find-mingw.ps1') 2>$null
 
 if ($mingw) {
     $env:PATH = "$mingw;$env:PATH"

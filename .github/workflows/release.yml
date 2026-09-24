@@ -24,17 +24,24 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Put MinGW on PATH
+      - name: Find the GNU toolchain
         shell: pwsh
         run: |
-          $mingw = 'C:\msys64\mingw64\bin'
-          if (-not (Test-Path (Join-Path $mingw 'as.exe'))) {
-            throw "The GNU assembler is not at $mingw. The runner image changed; build.ps1 lists the other places it looks."
+          # gcc links, and build.rs calls windres and ar to embed the icon, so
+          # the MSVC tools a Windows runner defaults to are not enough. The
+          # list of places to look is shared with build.ps1 rather than
+          # written out twice.
+          $mingw = & .\tools\find-mingw.ps1 2>$null
+          if (-not $mingw) {
+            Write-Host 'Not on the image; installing MinGW.'
+            choco install mingw -y --no-progress | Out-Null
+            $mingw = & .\tools\find-mingw.ps1
           }
+          Write-Host "Using $mingw"
           $mingw | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
       - name: Test before publishing anything
