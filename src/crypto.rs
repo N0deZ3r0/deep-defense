@@ -141,6 +141,33 @@ impl KdfParams {
     pub const MIN_M_COST: u32 = 65_536; // 64 MiB
     pub const MIN_T_COST: u32 = 2;
 
+    /// The ceiling exists for a different reason than the floor.
+    ///
+    /// The floor stops a user choosing a cost too cheap to be worth anything.
+    /// The ceiling stops a *file* doing it: these parameters are read out of
+    /// the vault header before anything in that file has been authenticated —
+    /// deriving the key is what authenticates it — so a crafted header decides
+    /// how much memory this program is about to ask for. `m_cost` is a u32,
+    /// which without a bound means up to four terabytes.
+    ///
+    /// Rust aborts on a failed allocation rather than returning an error, so
+    /// that is not a failure anything here could catch and report. It is a
+    /// dead process, and on a machine with generous swap, a wedged one.
+    ///
+    /// Set to the largest thing this program's own interface can produce,
+    /// and no larger. A ceiling below that would refuse a vault somebody
+    /// legitimately made and lock them out of it, which is worse than the
+    /// attack it would prevent; a ceiling above it would leave room the format
+    /// never uses.
+    ///
+    /// Two gibibytes across sixteen passes is the worst a crafted file can now
+    /// ask for: bounded memory, and tens of seconds rather than the rest of
+    /// the afternoon.
+    pub const MAX_M_COST: u32 = 2 * 1024 * 1024; // 2 GiB, as the settings slider
+    pub const MAX_T_COST: u32 = 16;
+    /// Lanes, not memory. More than this buys nothing and costs a thread each.
+    pub const MAX_P_COST: u32 = 16;
+
     pub fn validate(&self) -> Result<()> {
         if self.algorithm != "argon2id" {
             return Err(Error::crypto(format!(
@@ -165,6 +192,36 @@ impl KdfParams {
         if self.p_cost < 1 {
             return Err(Error::crypto("Argon2 parallelism must be at least 1"));
         }
+
+        // Everything below this point guards against the *file*, not the user.
+        if self.m_cost > Self::MAX_M_COST {
+            return Err(Error::crypto(format!(
+                "Argon2 memory cost {} KiB is above the {} KiB limit — \
+                 no vault written by this program asks for that much",
+                self.m_cost,
+                Self::MAX_M_COST
+            )));
+        }
+        if self.t_cost > Self::MAX_T_COST {
+            return Err(Error::crypto(format!(
+                "Argon2 time cost {} is above the limit of {}",
+                self.t_cost,
+                Self::MAX_T_COST
+            )));
+        }
+        if self.p_cost > Self::MAX_P_COST {
+            return Err(Error::crypto(format!(
+                "Argon2 parallelism {} is above the limit of {}",
+                self.p_cost,
+                Self::MAX_P_COST
+            )));
+        }
+
+        // Deliberately no rule on the product of the two. It would be the
+        // natural next thought — two gibibytes across sixteen passes is a lot
+        // of work — but every combination reachable here is one the settings
+        // screen offers, and a rule that refuses what the interface just
+        // suggested is a defect wearing the costume of a safeguard.
         Ok(())
     }
 
@@ -190,8 +247,12 @@ impl KdfParams {
             m_cost: Self::MIN_M_COST,
             ..Default::default()
         };
+        // Clamped so the search cannot arrive at a value the validator
+        // would then reject: a calibration that proposes an unusable setting
+        // is how a user ends up unable to save.
+        let ceiling = (max_memory_mib.saturating_mul(1024)).min(Self::MAX_M_COST);
         let mut m_cost = Self::MIN_M_COST;
-        while m_cost <= max_memory_mib * 1024 {
+        while m_cost <= ceiling {
             let candidate = Self {
                 m_cost,
                 ..Default::default()
@@ -558,6 +619,67 @@ mod tests {
         let secret = Secret::from_str(password);
         let key = derive_master_key(&secret, &header.salt_bytes().unwrap(), &header.kdf).unwrap();
         (seal(plaintext, &key, &header).unwrap(), header)
+    }
+
+    #[test]
+    fn a_cost_too_large_to_survive_is_refused() {
+        // These parameters arrive in a file an attacker chooses, and are used
+        // before anything in that file has been authenticated. A failed
+        // allocation aborts the process in Rust, so refusing here is the only
+        // place it can be refused at all.
+        let absurd = |m_cost, t_cost, p_cost| KdfParams {
+            m_cost,
+            t_cost,
+            p_cost,
+            algorithm: "argon2id".into(),
+        };
+
+        assert!(
+            absurd(u32::MAX, 2, 1).validate().is_err(),
+            "four terabytes of memory must not be attempted"
+        );
+        assert!(absurd(KdfParams::MAX_M_COST + 1, 2, 1).validate().is_err());
+        assert!(absurd(KdfParams::MIN_M_COST, u32::MAX, 1).validate().is_err());
+        assert!(absurd(KdfParams::MIN_M_COST, 2, u32::MAX).validate().is_err());
+
+        // The worst a file may ask for is still accepted, because the
+        // settings screen can produce it.
+        assert!(absurd(KdfParams::MAX_M_COST, KdfParams::MAX_T_COST, 1)
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn calibration_never_proposes_something_the_validator_refuses() {
+        // Asked for far more memory than the format allows; the search must
+        // stop at the ceiling rather than hand back an unusable setting.
+        let params = KdfParams::calibrated(std::time::Duration::from_millis(1), 64 * 1024);
+        assert!(params.validate().is_ok(), "{params:?}");
+        assert!(params.m_cost <= KdfParams::MAX_M_COST);
+    }
+
+    #[test]
+    fn the_settings_a_real_vault_uses_are_still_accepted() {
+        // A ceiling that refuses legitimate vaults is worse than none: it
+        // would lock people out of their own files.
+        assert!(KdfParams::default().validate().is_ok());
+        assert!(KdfParams {
+            m_cost: KdfParams::MIN_M_COST,
+            t_cost: KdfParams::MIN_T_COST,
+            p_cost: 1,
+            algorithm: "argon2id".into(),
+        }
+        .validate()
+        .is_ok());
+        // The most the settings screen can produce, which must stay usable.
+        assert!(KdfParams {
+            m_cost: KdfParams::MAX_M_COST,
+            t_cost: KdfParams::MAX_T_COST,
+            p_cost: KdfParams::MAX_P_COST,
+            algorithm: "argon2id".into(),
+        }
+        .validate()
+        .is_ok());
     }
 
     #[test]

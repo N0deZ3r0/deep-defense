@@ -141,6 +141,64 @@ pub fn type_text(_text: &str) -> crate::errors::Result<()> {
     ))
 }
 
+// ------------------------------------------------------------- durable rename
+
+/// Replace `to` with `from`, and do not return until the change is on the disk.
+///
+/// The vault is written to a sibling file, flushed, and then renamed over the
+/// real one, so a crash leaves either the old file or the new one. `sync_all`
+/// makes the *contents* durable, but the rename is a separate change to the
+/// directory, and nothing so far has waited for that. A power cut in the gap
+/// can leave a directory entry that has not reached the platter — pointing at
+/// either file, or at neither.
+///
+/// On Windows the flag for this is `MOVEFILE_WRITE_THROUGH`, which Rust's own
+/// `fs::rename` does not pass. Elsewhere the equivalent is opening the parent
+/// directory and syncing it.
+#[cfg(windows)]
+pub fn rename_durably(from: &std::path::Path, to: &std::path::Path) -> crate::errors::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    fn wide(path: &std::path::Path) -> Vec<u16> {
+        let mut encoded: Vec<u16> = path.as_os_str().encode_wide().collect();
+        encoded.push(0);
+        encoded
+    }
+
+    let (source, destination) = (wide(from), wide(to));
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        return Err(crate::errors::Error::io(
+            to.to_path_buf(),
+            std::io::Error::last_os_error(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn rename_durably(from: &std::path::Path, to: &std::path::Path) -> crate::errors::Result<()> {
+    std::fs::rename(from, to).map_err(|e| crate::errors::Error::io(to.to_path_buf(), e))?;
+    // The rename is a change to the directory, so the directory is what has to
+    // be synced. Best effort: a filesystem that refuses to open a directory as
+    // a file is not a reason to fail a save that has already succeeded.
+    if let Some(parent) = to.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    Ok(())
+}
+
 /// Debounces the lock check.
 ///
 /// A single failed `OpenInputDesktop` is not proof of anything — it can happen

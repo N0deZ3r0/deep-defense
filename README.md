@@ -7,7 +7,7 @@
 [![CI](https://github.com/N0deZ3r0/deep-defense/actions/workflows/ci.yml/badge.svg)](https://github.com/N0deZ3r0/deep-defense/actions/workflows/ci.yml)
 ![version](https://img.shields.io/badge/version-1.0.0-3b5bdb)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-4c6ef5)
-![tests](https://img.shields.io/badge/tests-301-2f9e44)
+![tests](https://img.shields.io/badge/tests-314-2f9e44)
 ![Rust](https://img.shields.io/badge/Rust-1.98-dea584)
 ![install](https://img.shields.io/badge/install-none-2f9e44)
 
@@ -81,7 +81,17 @@ by default.
   page file. `panic = "abort"` is deliberately **not** set: aborting would skip the
   destructors, which is to say the wiping.
 - **Atomic writes and five rotating backups**, plus an optional second directory so
-  the copies are not all on one disk.
+  the copies are not all on one disk. The rename that commits a save is made durable
+  too — flushing the file's contents is not the same as flushing the directory entry
+  that points at it, and a power cut in that gap is the one moment a vault could be
+  lost to a crash.
+- **A ceiling on what the file may ask for.** The Argon2 parameters live in the vault
+  header, which means they are chosen by whoever supplies the file, and they are read
+  before anything in it has been authenticated — deriving the key is what authenticates
+  it. Without a bound, `m_cost` is a `u32`: a crafted header could ask for four
+  terabytes, and a failed allocation in Rust ends the process rather than returning an
+  error. The bound is the largest thing this program's own settings can produce, so no
+  vault anyone legitimately made is refused by it.
 
 ## What it does beyond storing passwords
 
@@ -129,7 +139,7 @@ auto-lock on idle and on screen lock, and a clipboard that clears itself.
 ## How it is verified
 
 ```bash
-cargo test            # 301 tests, about four minutes
+cargo test            # 314 tests, about four minutes
 cargo build --release # or build.ps1, which also records the fingerprint
 ```
 
@@ -203,7 +213,17 @@ we decided it, and the reason is written down.
 14. **TOTP next to the password is one and a half factors.** It defeats phishing,
     credential stuffing and password reuse; it does not help if the vault itself is
     opened. The interface says so where the seed is entered.
-15. **The VeraCrypt container path has not been exercised live.** Its driver needs
+15. **A from-scratch build fails if the path contains a space.** `dlltool` does not
+    quote the temporary file it passes to the assembler. `build.ps1` works around it by
+    building elsewhere; a bare `cargo` command in such a path does not. The Build
+    section says what to set.
+16. **A second hidden vault destroys the first.** Making one under a different
+    password overwrites whatever was in that slot, without asking. Nothing could warn
+    you by checking: finding a hidden vault without its password is exactly what the
+    format prevents, so the program genuinely cannot tell the slot is taken. It says so
+    before the button, and a test asserts the behaviour rather than leaving it to be
+    discovered.
+17. **The VeraCrypt container path has not been exercised live.** Its driver needs
     administrator rights, and installing VeraCrypt on someone's behalf is wrong — it is
     a tool for protecting your data and worth fetching from the project's own page
     yourself. The command-line construction is covered by tests; the first real
@@ -223,6 +243,14 @@ explains where to put it and puts it on `PATH` for the build only.
 `tools/make_breach_filter.py` regenerates the bundled password filter and
 `tools/make_icon.py` the icon — both standard library only, so they run wherever Python
 does.
+
+**A space in the path breaks a from-scratch build.** `dlltool`, which rustc calls to
+build the import libraries the `windows-*` crates need, does not quote the temporary
+file name it hands to the assembler, so `C:\Users\me\My Projects\deep-defense`
+becomes a request for a file called `Projects\...`. It is a defect in binutils and
+nothing here can close it. `build.ps1` notices and builds into `%LOCALAPPDATA%`
+instead; a bare `cargo build` in such a path fails with a message about a missing `.o`
+file, and `CARGO_TARGET_DIR` set to somewhere without a space fixes it.
 
 ## Contributing
 

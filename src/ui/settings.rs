@@ -511,6 +511,19 @@ fn hidden_vault_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, str
             strings.hidden.warning_title,
             strings.hidden.warning_body,
         );
+        ui.add_space(theme::space::SM);
+        // Separate from the warning above, because it is a different kind of
+        // thing: that one is about remembering two passwords, this one is
+        // about destroying a vault the program is structurally unable to warn
+        // you about by checking.
+        widgets::notice(
+            ui,
+            palette,
+            palette.danger,
+            Icon::Warning,
+            strings.hidden.replaces_existing_title,
+            strings.hidden.replaces_existing_body,
+        );
         ui.add_space(theme::space::MD);
 
         let width = ui.available_width();
@@ -1019,7 +1032,7 @@ fn resize_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: 
             ui.label(theme::muted(palette, strings.settings.kdf_memory));
             ui.add(
                 egui::DragValue::new(&mut app.settings.resize_memory_mib)
-                    .range(KdfParams::MIN_M_COST / 1024..=4096)
+                    .range(KdfParams::MIN_M_COST / 1024..=KdfParams::MAX_M_COST / 1024)
                     .speed(8.0)
                     .suffix(" MiB"),
             );
@@ -1027,7 +1040,7 @@ fn resize_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: 
             ui.label(theme::muted(palette, strings.settings.kdf_passes));
             ui.add(
                 egui::DragValue::new(&mut app.settings.resize_time_cost)
-                    .range(KdfParams::MIN_T_COST..=16),
+                    .range(KdfParams::MIN_T_COST..=KdfParams::MAX_T_COST),
             );
         });
 

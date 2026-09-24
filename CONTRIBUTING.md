@@ -18,7 +18,7 @@ derived or refused comes with a test that fails without it.
 
 ## Before you file a bug
 
-Read the **Limits** section of the README. Fifteen things are listed there as knowingly
+Read the **Limits** section of the README. Seventeen things are listed there as knowingly
 open, with the reason for each. If what you found is one of them, it is not a bug — though
 a measurement showing one of them is *worse* than described is very welcome.
 
@@ -28,12 +28,17 @@ If it is a vulnerability rather than a bug, do not open an issue at all: see
 ## Running it
 
 ```bash
-cargo test            # 301 tests, about four minutes
+cargo test            # 314 tests, about four minutes
 cargo build --release
 ```
 
 Or `build.ps1`, which locates the toolchain, builds and records the fingerprint. Rust 1.98,
 target `x86_64-pc-windows-gnu` — the README says why, and what to install for it.
+
+If your clone sits in a path containing a space, set `CARGO_TARGET_DIR` to somewhere
+without one before running cargo directly. `dlltool` does not quote the temporary file it
+hands the assembler, and the failure reads like a missing object file rather than a path
+problem. `build.ps1` handles it for you.
 
 The slowest tests are the vault ones, because each creates a real vault and each unlock is
 a real Argon2id pass at the floor cost. That is the point of them; they are slow for the
@@ -84,7 +89,7 @@ Argon2id, AES-256-GCM, XChaCha20-Poly1305, HKDF, схема Шамира над 
 
 ## Прежде чем заводить баг
 
-Прочитайте раздел **«Известные ограничения»** в README. Там пятнадцать пунктов, заведомо
+Прочитайте раздел **«Известные ограничения»** в README. Там семнадцать пунктов, заведомо
 оставленных открытыми, и причина по каждому. Если вы нашли один из них — это не баг. А вот
 измерение, показывающее, что какой-то из них *хуже*, чем описано, очень пригодится.
 
@@ -93,12 +98,17 @@ Argon2id, AES-256-GCM, XChaCha20-Poly1305, HKDF, схема Шамира над 
 ## Как запустить
 
 ```bash
-cargo test            # 301 тест, около четырёх минут
+cargo test            # 314 тестов, около четырёх минут
 cargo build --release
 ```
 
 Или `build.ps1` — он находит инструментарий, собирает и записывает отпечаток. Rust 1.98,
 цель `x86_64-pc-windows-gnu`; в README сказано, почему именно она и что для неё поставить.
+
+Если клон лежит в пути с пробелом, задайте `CARGO_TARGET_DIR` на путь без пробела,
+прежде чем звать cargo напрямую. `dlltool` не заключает в кавычки временный файл,
+и ошибка выглядит как пропавший объектный файл, а не как беда с путём. `build.ps1`
+делает это за вас.
 
 Самые медленные тесты — про хранилище: каждый создаёт настоящее хранилище, и каждое
 открытие — настоящий проход Argon2id по нижней границе стоимости. В этом и смысл: они

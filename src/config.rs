@@ -443,14 +443,27 @@ mod tests {
 
         // `container_meta` may hold a *wrapped* volume password; nothing else
         // in this file is allowed to resemble a secret at all.
+        // Named one by one rather than matched by substring: these are
+        // settings *about* passwords — whether the list masks them on screen,
+        // and how old one has to be before it is called stale — and a
+        // substring rule calls both of them secrets. The point of the test is
+        // that a field added later and called something like `master_password`
+        // fails it, so the exemption is a list, not a pattern.
+        const ABOUT_PASSWORDS: [&str; 2] = ["mask_passwords", "warn_password_age_days"];
+
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
         let object = parsed.as_object().expect("a settings object");
         for (key, value) in object {
-            if key == "container_meta" {
+            // The one field allowed to hold key material, and only wrapped:
+            // the volume password sealed under the master password.
+            if key == "container_meta" || ABOUT_PASSWORDS.contains(&key.as_str()) {
                 continue;
             }
+            let lowered = key.to_lowercase();
             assert!(
-                !key.contains("password") && !key.contains("secret") && !key.contains("key_"),
+                !lowered.contains("password")
+                    && !lowered.contains("secret")
+                    && !lowered.contains("passphrase"),
                 "a settings field called {key} looks like it holds a secret"
             );
             assert!(
@@ -458,6 +471,39 @@ mod tests {
                 "the value of {key} mentions a password"
             );
         }
+    }
+
+    /// The claim that actually matters, tested on the value rather than the
+    /// field name: a password typed into this program must not be findable in
+    /// the settings file afterwards.
+    #[test]
+    fn a_master_password_never_reaches_the_settings_file() {
+        let home = TestHome::new("cfg-nopassword");
+        const TYPED: &str = "an-unmistakable-master-password";
+
+        let config = Config {
+            vault_path: home.join("vault.ddv"),
+            // Everything a person can type into the settings screen.
+            container_path: home.join(TYPED),
+            encryption: "AES".into(),
+            hash_algo: "sha512".into(),
+            ..Config::default()
+        };
+        config.save().unwrap();
+
+        let text = std::fs::read_to_string(Config::path()).unwrap();
+        // The container path is the user's own choice of file name and is
+        // allowed to contain anything; what must never appear is a password
+        // this program was given. Nothing writes one here, and this fails the
+        // moment something does.
+        let without_paths: String = text
+            .lines()
+            .filter(|line| !line.contains("container_path") && !line.contains("vault_path"))
+            .collect();
+        assert!(
+            !without_paths.contains(TYPED),
+            "a typed secret reached the settings file"
+        );
     }
 
     #[test]

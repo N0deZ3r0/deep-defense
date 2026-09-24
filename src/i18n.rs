@@ -287,6 +287,8 @@ pub struct HiddenText {
     pub created_body: &'static str,
     pub same_password: &'static str,
     pub exists: &'static str,
+    pub replaces_existing_title: &'static str,
+    pub replaces_existing_body: &'static str,
     pub in_hidden_title: &'static str,
     pub in_hidden_body: &'static str,
     pub unavailable: &'static str,
@@ -933,6 +935,8 @@ pub static EN: Strings = Strings {
                        unchanged and still opens with the password you used to get here.",
         same_password: "It must differ from this vault's password.",
         exists: "A hidden vault already exists under that password.",
+        replaces_existing_title: "If a hidden vault already exists, this replaces it",
+        replaces_existing_body: "The program cannot see a hidden vault made under a different password — that is what makes it hidden. So making a second one overwrites the first, without asking and without any way back. If you have made one already, open it with its own password rather than creating another.",
         in_hidden_title: "You are in the hidden vault",
         in_hidden_body: "The other vault in this file is untouched and still opens with \
                          its own password.",
@@ -1462,6 +1466,8 @@ pub static RU: Strings = Strings {
                        и по-прежнему открывается тем паролем, которым вы вошли.",
         same_password: "Он должен отличаться от пароля этого хранилища.",
         exists: "Скрытое хранилище с таким паролем уже существует.",
+        replaces_existing_title: "Если скрытое хранилище уже есть, оно будет заменено",
+        replaces_existing_body: "Программа не видит скрытого хранилища, созданного под другим паролем, — именно это делает его скрытым. Поэтому создание второго затрёт первое без вопросов и без возможности вернуть. Если вы уже делали скрытое хранилище — откройте его своим паролем, а не создавайте ещё одно.",
         in_hidden_title: "Вы в скрытом хранилище",
         in_hidden_body: "Второе хранилище в этом файле не затронуто и открывается своим \
                          паролем.",

@@ -537,7 +537,7 @@ impl Vault {
             // the contents not.
             file.sync_all().map_err(|e| Error::io(tmp.clone(), e))?;
         }
-        std::fs::rename(&tmp, &self.path).map_err(|e| Error::io(self.path.clone(), e))?;
+        crate::platform::rename_durably(&tmp, &self.path)?;
 
         self.dirty = false;
         self.write_anchor();
@@ -587,7 +587,7 @@ impl Vault {
             file.write_all(blob).map_err(|e| Error::io(tmp.clone(), e))?;
             file.sync_all().map_err(|e| Error::io(tmp.clone(), e))?;
         }
-        std::fs::rename(&tmp, &target).map_err(|e| Error::io(target.clone(), e))?;
+        crate::platform::rename_durably(&tmp, &target)?;
         Ok(())
     }
 
@@ -1165,6 +1165,46 @@ mod tests {
         let secret = Secret::from_str("hidden");
         let _first = decoy.create_hidden(&secret).unwrap();
         assert!(decoy.create_hidden(&secret).is_err());
+    }
+
+    /// The other half of the same question, and the uncomfortable half.
+    ///
+    /// The check above only works because the same password is offered twice.
+    /// Under a *different* password there is nothing to check against: finding
+    /// a hidden vault without its password is precisely what the format is
+    /// built to prevent, so `hidden_slot_is_free` answers "free" and the
+    /// existing vault is overwritten.
+    ///
+    /// This is not a defect that could be fixed without giving up deniability,
+    /// so it is asserted rather than left to be discovered. The interface says
+    /// so in as many words before the button is pressed.
+    #[test]
+    fn a_second_hidden_vault_under_another_password_destroys_the_first() {
+        let dir = TempDir::new("twice-other");
+        let decoy_secret = Secret::from_str("decoy");
+        let first_secret = Secret::from_str("the first hidden one");
+        let second_secret = Secret::from_str("the second hidden one");
+
+        let decoy = small_vault(&dir.vault(), &decoy_secret);
+        let mut first = decoy.create_hidden(&first_secret).unwrap();
+        first.add(sample_entry("Real", "irreplaceable")).unwrap();
+        first.save().unwrap();
+        drop(first);
+
+        // The program cannot tell the slot is taken, and says so.
+        let decoy = Vault::open(&dir.vault(), &decoy_secret, true).unwrap();
+        assert!(
+            decoy.hidden_slot_is_free(&second_secret),
+            "it answers from what it can check, which is only this password"
+        );
+
+        let _second = decoy.create_hidden(&second_secret).unwrap();
+        assert!(
+            Vault::open(&dir.vault(), &first_secret, true).is_err(),
+            "the first hidden vault is gone, and nothing could have warned by checking"
+        );
+        assert!(Vault::open(&dir.vault(), &second_secret, true).is_ok());
+        assert!(Vault::open(&dir.vault(), &decoy_secret, true).is_ok());
     }
 
     #[test]

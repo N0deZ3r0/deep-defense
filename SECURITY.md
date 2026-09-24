@@ -38,7 +38,7 @@ holding two vaults does not admit it. In scope:
 - Any parser brought down by a crafted file — the vault file, an imported CSV or JSON, a
   wordlist, a recovery piece
 
-**Out of scope: the fifteen items in the README's Limits section.** They are known, argued
+**Out of scope: the seventeen items in the README's Limits section.** They are known, argued
 and deliberate. A measurement showing one of them is materially worse than described *is*
 in scope — send it.
 
@@ -82,7 +82,7 @@ in the README rather than defended against.
 пароле, или сборка пароля из меньшего числа частей, чем порог; любой разборщик, который
 удаётся уронить подделанным файлом.
 
-**Вне области — пятнадцать пунктов раздела «Известные ограничения» в README.** Они
+**Вне области — семнадцать пунктов раздела «Известные ограничения» в README.** Они
 известны, обоснованы и оставлены намеренно. Но измерение, показывающее, что какой-то из них
 существенно хуже описанного, — в области действия, присылайте.
 

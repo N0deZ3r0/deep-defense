@@ -191,10 +191,15 @@ mod tests {
         for error in one_of_each() {
             let english = error.localized(&EN);
             let russian = error.localized(&RU);
-            if matches!(error, Error::Vault(_)) {
-                // Deliberately the caller's own message, which is not
-                // translated; see `localized`.
-                assert_eq!(english, russian);
+            // Three are the same in both languages on purpose. `Vault` is
+            // the caller's own message, passed through untranslated.
+            // `VeraCrypt: {}` is a product name followed by that tool's own
+            // output, and `{}: {}` is a path and an operating-system error.
+            // There is nothing in any of them left to translate, and inventing
+            // a difference to satisfy a test would mean translating a product
+            // name.
+            if matches!(error, Error::Vault(_) | Error::VeraCrypt(_) | Error::Io { .. }) {
+                assert_eq!(english, russian, "{error:?} should pass through unchanged");
                 continue;
             }
             assert_ne!(
