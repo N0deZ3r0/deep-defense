@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only. Nothing in this workflow publishes anything, and a token that
+# cannot write is one fewer thing to reason about if a dependency turns hostile.
+permissions:
+  contents: read
+
+# A second push supersedes the first: there is no value in finishing a run for
+# a commit nobody is looking at any more.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Lint, test and build
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      # Only first-party actions are used here. A password manager's build
+      # pipeline is a place worth keeping the list of things that can run
+      # arbitrary code as short as it can be, and a caching action would save a
+      # few minutes in exchange for another supply chain to trust.
+      - uses: actions/checkout@v4
+
+      - name: Put MinGW on PATH
+        shell: pwsh
+        run: |
+          # rust-toolchain.toml pins the GNU host, and build.rs calls windres
+          # and ar directly to embed the icon, so the MSVC tools the runner
+          # defaults to are not enough. windows-latest ships MSYS2, whose
+          # mingw64 directory carries gcc, as, ar and windres together.
+          $mingw = 'C:\msys64\mingw64\bin'
+          if (-not (Test-Path (Join-Path $mingw 'as.exe'))) {
+            throw "The GNU assembler is not at $mingw. The runner image changed; build.ps1 lists the other places it looks."
+          }
+          $mingw | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install the lint
+        # rust-toolchain.toml installs the channel on the first cargo call, but
+        # clippy is a separate component and is not part of the minimal profile.
+        run: rustup component add clippy
+
+      - name: Record what built this
+        shell: pwsh
+        run: |
+          rustc --version
+          cargo --version
+          gcc --version | Select-Object -First 1
+          windres --version | Select-Object -First 1
+
+      - name: Lint
+        # Warnings are errors here on purpose. A lint that only prints is read
+        # once and then scrolled past for the rest of the project's life.
+        run: cargo clippy --lib --all-targets -- -D warnings
+
+      - name: Test
+        # Debug, not release: the release profile drops the arithmetic overflow
+        # checks, and one of these tests exists because a length field
+        # overflowed rather than saturating. Running them fast would be running
+        # a weaker version of them.
+        run: cargo test --lib
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Fingerprint
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 target\release\deep-defense.exe).Hash.ToLower()
+          $size = [math]::Round((Get-Item target\release\deep-defense.exe).Length / 1MB, 1)
+          Write-Output "deep-defense.exe  $size MB"
+          Write-Output "sha256  $hash"
+          # Rust builds are not reproducible byte for byte, so this will differ
+          # from run to run. It is here to be compared against the binary a
+          # release publishes, not against a previous CI run.
+          "### Built\n\n``$hash``\n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deep-defense-windows-${{ github.sha }}
+          path: |
+            target/release/deep-defense.exe
+          # Long enough to fetch a build from a pull request while reviewing it,
+          # short enough not to leave unsigned binaries lying around for months.
+          retention-days: 14
+          if-no-files-found: error

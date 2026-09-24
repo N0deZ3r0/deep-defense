@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing tag to build and attach the binary to
+        required: true
+
+# Write, because this uploads to a release. Nothing else in the repository
+# needs it, which is why it is granted here and not in CI.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build and attach
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Put MinGW on PATH
+        shell: pwsh
+        run: |
+          $mingw = 'C:\msys64\mingw64\bin'
+          if (-not (Test-Path (Join-Path $mingw 'as.exe'))) {
+            throw "The GNU assembler is not at $mingw. The runner image changed; build.ps1 lists the other places it looks."
+          }
+          $mingw | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Test before publishing anything
+        # A release is the one build people run without reading it first, so it
+        # is the last place to skip the tests to save four minutes.
+        run: cargo test --lib
+
+      - name: Build and fingerprint
+        shell: pwsh
+        # The same script used to build by hand, so the released binary and a
+        # local one are made the same way and the fingerprint is computed in
+        # one place rather than two that can drift apart.
+        run: .\build.ps1
+
+      - name: Show what will be attached
+        shell: pwsh
+        run: Get-Content SHA256SUMS.txt
+
+      - name: Attach to the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = if ('${{ inputs.tag }}') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
+          # --clobber so re-running this on a tag replaces the assets rather
+          # than failing half way and leaving a release with one of the two.
+          gh release upload $tag `
+            target/release/deep-defense.exe `
+            SHA256SUMS.txt `
+            --clobber --repo ${{ github.repository }}

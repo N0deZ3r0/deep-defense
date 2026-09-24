@@ -28,7 +28,7 @@ If it is a vulnerability rather than a bug, do not open an issue at all: see
 ## Running it
 
 ```bash
-cargo test            # 281 tests, about four minutes
+cargo test            # 301 tests, about four minutes
 cargo build --release
 ```
 
@@ -93,7 +93,7 @@ Argon2id, AES-256-GCM, XChaCha20-Poly1305, HKDF, схема Шамира над 
 ## Как запустить
 
 ```bash
-cargo test            # 281 тест, около четырёх минут
+cargo test            # 301 тест, около четырёх минут
 cargo build --release
 ```
 
