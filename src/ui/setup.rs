@@ -234,7 +234,7 @@ fn password_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &
                             app.reveal_password = true;
                             app.status = Some(Status::warn(
                                 strings.setup.suggested_title,
-                                &fill1(strings.setup.suggested_body, format!("{bits:.0}")),
+                                fill1(strings.setup.suggested_body, format!("{bits:.0}")),
                             ));
                         }
                         Err(e) => app.status = Some(Status::error(strings, &e)),

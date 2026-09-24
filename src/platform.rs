@@ -240,8 +240,7 @@ mod tests {
 
     #[test]
     fn resetting_clears_the_count() {
-        let mut watcher = LockWatcher::default();
-        watcher.consecutive = 1;
+        let mut watcher = LockWatcher { consecutive: 1 };
         watcher.reset();
         assert_eq!(watcher.consecutive, 0);
     }

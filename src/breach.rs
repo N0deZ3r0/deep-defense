@@ -64,7 +64,7 @@ pub struct Filter {
 impl Filter {
     /// An empty filter of the given shape.
     pub fn new(m_bits: u64, k: u32) -> Result<Self> {
-        if !(MIN_M_BITS..=MAX_M_BITS).contains(&m_bits) || m_bits % 8 != 0 {
+        if !(MIN_M_BITS..=MAX_M_BITS).contains(&m_bits) || !m_bits.is_multiple_of(8) {
             return Err(Error::format("that filter size is not usable"));
         }
         if k == 0 || k > 64 {

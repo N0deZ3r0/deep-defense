@@ -158,6 +158,12 @@ impl VeraCrypt {
     ///
     /// Refuses to touch an existing file: silently reformatting a container
     /// would destroy whatever was inside it.
+    ///
+    /// Eight arguments, and a struct to hold them would be worse: every one is
+    /// a distinct decision VeraCrypt's command line demands, and bundling them
+    /// would let a caller build a half-filled struct that only fails when the
+    /// process runs.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_volume(
         &self,
         container: &Path,
@@ -554,12 +560,9 @@ fn first_existing(candidates: &[&str]) -> Option<PathBuf> {
 fn which(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).find_map(|dir| {
-        for candidate in [dir.join(program), dir.join(format!("{program}.exe"))] {
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-        None
+        [dir.join(program), dir.join(format!("{program}.exe"))]
+            .into_iter()
+            .find(|candidate| candidate.is_file())
     })
 }
 

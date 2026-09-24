@@ -315,9 +315,7 @@ pub fn estimate_entropy_bits(password: &str) -> f64 {
     }
     // Anything outside those sets (accents, emoji, CJK) widens the pool a lot;
     // count it modestly rather than rewarding exotic characters too heavily.
-    if password
-        .chars()
-        .any(|c| !c.is_ascii() )
+    if !password.is_ascii()
     {
         pool += 128;
     }
@@ -525,7 +523,7 @@ mod tests {
                 check_master_password(&phrase),
                 None,
                 "the generator produced a phrase its own gate rejects: {}",
-                &*phrase
+                *phrase
             );
         }
     }

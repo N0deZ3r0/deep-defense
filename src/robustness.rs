@@ -65,7 +65,7 @@ fn position(rng: &mut Rng, length: usize) -> usize {
     if length == 0 {
         return 0;
     }
-    if rng.next() % 2 == 0 {
+    if rng.next().is_multiple_of(2) {
         rng.below(length.min(128))
     } else {
         rng.below(length)
@@ -322,7 +322,7 @@ mod tests {
             b"AAAA-AAAA-AAAA".to_vec(),
             Vec::new(),
         ];
-        hunt_text("shamir::parse_share", 0x5A_5E_C2E7, 20_000, &corpus, |text| {
+        hunt_text("shamir::parse_share", 0x5A5E_C2E7, 20_000, &corpus, |text| {
             let _ = crate::shamir::parse_share(text);
             let found = crate::shamir::parse_shares(text);
             // Combining whatever turned up must also be survivable: these are
@@ -360,7 +360,7 @@ mod tests {
             vec![b'x'; 4096],
             Vec::new(),
         ];
-        hunt_text("breach::import", 0xC0FFEE_11, 5_000, &corpus, |text| {
+        hunt_text("breach::import", 0xC0FF_EE11, 5_000, &corpus, |text| {
             let mut catalogue = crate::breach::Catalogue::bundled_only();
             let _ = catalogue.import(text);
         });

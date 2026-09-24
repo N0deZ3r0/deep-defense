@@ -383,7 +383,7 @@ impl Drop for Session {
 // These block for seconds at a time (Argon2id twice, plus a mount), so the
 // GUI runs them on a worker thread.
 
-//// Create a new vault and leave it open.
+/// Create a new vault and leave it open.
 ///
 /// Dispatches on `config.use_container`: standalone is the default, because
 /// the container layer needs VeraCrypt's kernel driver and therefore

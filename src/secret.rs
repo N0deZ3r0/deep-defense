@@ -92,6 +92,11 @@ impl Secret {
         Self { inner }
     }
 
+    /// Not `std::str::FromStr`: that returns a `Result`, and there is no way
+    /// for turning text into a secret to fail. Making it fallible to satisfy
+    /// the trait would add an unwrap at every call site, which is worse than
+    /// sharing a name with it.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str) -> Self {
         Self::new(text.as_bytes().to_vec())
     }
@@ -176,6 +181,11 @@ impl Key {
         &self.bytes
     }
 
+    /// Not `std::convert::AsMut`: that would let a key be handed to generic
+    /// code expecting a plain array, which is exactly the accident this type
+    /// exists to prevent. The name is the familiar one; the trait is not
+    /// implemented on purpose.
+    #[allow(clippy::should_implement_trait)]
     pub fn as_mut(&mut self) -> &mut [u8; 32] {
         &mut self.bytes
     }

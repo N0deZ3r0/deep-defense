@@ -1132,8 +1132,7 @@ mod tests {
         let _ = decoy.create_hidden(&Secret::from_str("hidden")).unwrap();
 
         let err = Vault::open(&dir.vault(), &Secret::from_str("wrong"), true)
-            .err()
-            .expect("neither slot should open");
+            .expect_err("neither slot should open");
         assert!(matches!(err, Error::Authentication));
     }
 

@@ -376,7 +376,7 @@ fn master_password_section(
                             app.settings.new_password_confirm = phrase;
                             app.status = Some(Status::warn(
                                 strings.setup.suggested_title,
-                                &fill1(strings.setup.suggested_body, format!("{bits:.0}")),
+                                fill1(strings.setup.suggested_body, format!("{bits:.0}")),
                             ));
                         }
                         Err(e) => app.status = Some(Status::error(strings, &e)),
@@ -547,7 +547,7 @@ fn hidden_vault_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, str
                         app.settings.hidden_confirm = phrase;
                         app.status = Some(Status::warn(
                             strings.setup.suggested_title,
-                            &fill1(strings.setup.suggested_body, format!("{bits:.0}")),
+                            fill1(strings.setup.suggested_body, format!("{bits:.0}")),
                         ));
                     }
                 }
@@ -832,7 +832,7 @@ fn export_vault(app: &mut App, as_json: bool) {
         Ok(()) => {
             app.status = Some(Status::warn(
                 strings.portable.exported_title,
-                &fill1(strings.portable.exported_body, path.display()),
+                fill1(strings.portable.exported_body, path.display()),
             ))
         }
         Err(e) => app.status = Some(Status::error(strings, &e)),
@@ -866,7 +866,7 @@ fn import_vault(app: &mut App) {
         if report.added > 0 {
             vault
                 .data
-                .record(crate::model::AuditAction::EntryAdded, &fill1(
+                .record(crate::model::AuditAction::EntryAdded, fill1(
                     strings.portable.audit_import,
                     report.added,
                 ));
@@ -1154,7 +1154,7 @@ fn apply_rebuild(
             }
             app.status = Some(Status::warn(
                 strings.resize.done_title,
-                &fill2(
+                fill2(
                     strings.resize.done_body,
                     human_bytes(report.old_capacity.min(old_capacity)),
                     human_bytes(report.new_capacity),
@@ -1231,7 +1231,7 @@ fn export_anchor(app: &mut App) {
         .and_then(|vault| vault.export_anchor(&path));
     match outcome {
         Ok(()) => {
-            app.status = Some(Status::success(&fill1(
+            app.status = Some(Status::success(fill1(
                 strings.anchor.exported,
                 path.display(),
             )))
@@ -1503,7 +1503,7 @@ pub fn show_recovery_window(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(theme::space::MD);
             ui.label(theme::muted(
                 palette,
-                &fill1(strings.recovery.card_note, threshold),
+                fill1(strings.recovery.card_note, threshold),
             ));
             ui.add_space(theme::space::MD);
 
@@ -1514,7 +1514,7 @@ pub fn show_recovery_window(app: &mut App, ui: &mut egui::Ui) {
                         widgets::card(ui, palette, |ui| {
                             ui.label(theme::label_caps(
                                 palette,
-                                &fill2(strings.recovery.card_share, index + 1, total),
+                                fill2(strings.recovery.card_share, index + 1, total),
                             ));
                             ui.add_space(theme::space::XS);
                             // Selectable and monospaced: this is meant to be
@@ -1586,7 +1586,7 @@ fn save_recovery_shares(app: &mut App) {
         Ok(()) => {
             app.status = Some(Status::warn(
                 strings.recovery.warning_title,
-                &fill1(strings.recovery.saved, path.display()),
+                fill1(strings.recovery.saved, path.display()),
             ))
         }
         Err(e) => {
@@ -1658,7 +1658,7 @@ fn import_wordlist(app: &mut App) {
 
     match outcome {
         Ok(summary) => {
-            app.status = Some(Status::success(&fill2(
+            app.status = Some(Status::success(fill2(
                 strings.breach.import_done,
                 summary.added,
                 summary.as_digests,
