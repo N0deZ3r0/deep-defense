@@ -38,6 +38,11 @@ holding two vaults does not admit it. In scope:
 - Any parser brought down by a crafted file — the vault file, an imported CSV or JSON, a
   wordlist, a recovery piece
 
+If you are reviewing rather than reporting: [`docs/FORMAT.md`](docs/FORMAT.md)
+specifies every byte this program writes, and
+[`tools/reference_vault.py`](tools/reference_vault.py) is an independent
+implementation of the vault format you can read in one sitting.
+
 **Out of scope: the seventeen items in the README's Limits section.** They are known, argued
 and deliberate. A measurement showing one of them is materially worse than described *is*
 in scope — send it.

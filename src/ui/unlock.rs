@@ -95,6 +95,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
                 ui.add_space(theme::space::MD);
                 recovery_panel(app, ui, palette, strings);
+                ui.add_space(theme::space::SM);
+                backups_panel(app, ui, palette, strings);
 
                 ui.add_space(theme::space::MD);
                 let uses_container = app.session.config.use_container;
@@ -259,5 +261,60 @@ fn rebuild_password(app: &mut App, shares: &[crate::shamir::Share]) {
             }
         },
         Err(e) => app.status = Some(Status::error(strings, &e)),
+    }
+}
+
+/// Restore from a backup before unlocking.
+///
+/// The lock screen is where a missing vault is noticed: the password that
+/// used to open it no longer does. So that is where putting the file back has
+/// to be possible, without first opening something else. Only for a vault
+/// kept as a plain file — inside a container, the backups are on a volume
+/// that is not mounted yet.
+fn backups_panel(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &Strings) {
+    if app.session.config.use_container {
+        return;
+    }
+    let path = app.session.config.vault_path.clone();
+    let backups = crate::vault::list_backups(&path);
+    if backups.is_empty() {
+        return;
+    }
+
+    if !app.show_backups_unlock {
+        ui.vertical_centered(|ui| {
+            if ui.link(strings.backups.open_on_unlock).clicked() {
+                app.show_backups_unlock = true;
+            }
+        });
+        return;
+    }
+
+    let mut chosen = None;
+    widgets::card(ui, palette, |ui| {
+        widgets::field_label_first(ui, palette, strings.backups.section);
+        widgets::hint(ui, palette, strings.backups.hint);
+        ui.add_space(theme::space::SM);
+        chosen = super::settings::backups_list(
+            ui,
+            palette,
+            strings,
+            &backups,
+            &mut app.settings.restoring_backup,
+        );
+        ui.add_space(theme::space::SM);
+        if ui.button(strings.common.close).clicked() {
+            app.show_backups_unlock = false;
+            app.settings.restoring_backup = None;
+        }
+    });
+
+    if let Some(index) = chosen {
+        app.settings.restoring_backup = None;
+        app.show_backups_unlock = false;
+        app.status = Some(match crate::vault::restore_backup(&path, index) {
+            Ok(()) => Status::warn(strings.backups.restored_title, strings.backups.restored_body),
+            Err(e) => Status::error(strings, &e),
+        });
     }
 }

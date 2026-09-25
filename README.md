@@ -7,7 +7,7 @@
 [![CI](https://github.com/N0deZ3r0/deep-defense/actions/workflows/ci.yml/badge.svg)](https://github.com/N0deZ3r0/deep-defense/actions/workflows/ci.yml)
 ![version](https://img.shields.io/badge/version-1.0.0-3b5bdb)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-4c6ef5)
-![tests](https://img.shields.io/badge/tests-314-2f9e44)
+![tests](https://img.shields.io/badge/tests-338-2f9e44)
 ![Rust](https://img.shields.io/badge/Rust-1.98-dea584)
 ![install](https://img.shields.io/badge/install-none-2f9e44)
 
@@ -139,7 +139,7 @@ auto-lock on idle and on screen lock, and a clipboard that clears itself.
 ## How it is verified
 
 ```bash
-cargo test            # 314 tests, about four minutes
+cargo test            # 338 tests, about four minutes
 cargo build --release # or build.ps1, which also records the fingerprint
 ```
 
@@ -161,6 +161,20 @@ tree and fails if any interactive control has no name. The field helpers take th
 as a **required argument**, so forgetting it is a compile error rather than a defect
 nobody sighted will ever notice.
 
+**The format is written down, and a second implementation checks it.**
+[`docs/FORMAT.md`](docs/FORMAT.md) specifies every byte this program writes — the
+vault file, the sealed volume password, the rollback record, the recovery pieces,
+the password filter — so the construction can be reviewed without reading Rust.
+[`tools/reference_vault.py`](tools/reference_vault.py) implements the vault format
+from that text on top of different libraries: OpenSSL through `cryptography`, and
+the Argon2 authors' own C code through `argon2-cffi`. It checks itself against the
+published RFC 5869 and XChaCha20 vectors first. `src/vectors.rs` then requires the
+Rust code to produce the same bytes as the reference, and to open
+`tests/vectors/reference-v2.ddv`, a vault file the Rust code did not write. Agreement
+between two implementations on different libraries is not an audit, but it is
+evidence that the specification describes what the program does — which is what an
+audit would need first.
+
 The vault tests include the case that matters most for re-keying: a wrong master
 password must be refused **before a single byte is written**, because sealing a vault
 under a password nobody knows would be silent and permanent.
@@ -172,7 +186,9 @@ we decided it, and the reason is written down.
 
 1. **It has not been audited.** One author, no external review. The construction uses
    only well-studied primitives, but assembling proven parts is not the same as having
-   the assembly checked.
+   the assembly checked. What can be done short of that has been: the format is
+   specified byte for byte in `docs/FORMAT.md`, and an independent implementation
+   produces the same bytes. The remaining step is a person.
 2. **Wiping memory is not absolute.** The OS can page a buffer out before it is
    overwritten, hibernation writes all of memory to disk regardless, and a debugger
    running as the same user reads the process through. Pinning pages is best-effort and
@@ -206,8 +222,12 @@ we decided it, and the reason is written down.
     thing: that the window is not this program's own. The rest is the five-second
     countdown, which is there to be used.
 12. **The rollback record is tied to this computer.** On a new machine the first open
-    has nothing to compare against. The program now says so, and the record can be
-    carried across by hand, but it does not follow the file automatically.
+    has nothing to compare against; the program says so, and the record can be carried
+    across by hand. Deleting the record no longer passes silently: the vault remembers,
+    inside its ciphertext, which computers it has had a record on, so a missing record on
+    one of them is reported as removed rather than taken for a first visit. The gap that
+    remains is an older copy of the file from before this computer was first listed —
+    that still looks like a first visit, and is reported as one.
 13. **Accessibility has not been tested with a live screen reader.** The AccessKit tree
     is under test; nobody has sat down with NVDA or Narrator.
 14. **TOTP next to the password is one and a half factors.** It defeats phishing,
@@ -220,9 +240,10 @@ we decided it, and the reason is written down.
 16. **A second hidden vault destroys the first.** Making one under a different
     password overwrites whatever was in that slot, without asking. Nothing could warn
     you by checking: finding a hidden vault without its password is exactly what the
-    format prevents, so the program genuinely cannot tell the slot is taken. It says so
-    before the button, and a test asserts the behaviour rather than leaving it to be
-    discovered.
+    format prevents, so the program genuinely cannot tell the slot is taken. It can be
+    undone, though: the save that overwrote it copied the file aside first, and backup 1
+    can be put back from the lock screen or from Settings → Backups until five more saves
+    push it out. The program says both things before and after the button.
 17. **The VeraCrypt container path has not been exercised live.** Its driver needs
     administrator rights, and installing VeraCrypt on someone's behalf is wrong — it is
     a tool for protecting your data and worth fetching from the project's own page

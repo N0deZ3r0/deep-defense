@@ -94,6 +94,23 @@ pub struct Strings {
     pub anchor: AnchorText,
     pub recovery: RecoveryText,
     pub breach: BreachText,
+    pub backups: BackupsText,
+}
+
+pub struct BackupsText {
+    pub section: &'static str,
+    pub hint: &'static str,
+    pub none: &'static str,
+    /// "{}" is the backup's number, "{}" its date and size.
+    pub entry: &'static str,
+    pub restore: &'static str,
+    pub confirm_title: &'static str,
+    /// "{}" is the backup's number.
+    pub confirm_body: &'static str,
+    pub restored_title: &'static str,
+    pub restored_body: &'static str,
+    pub open_on_unlock: &'static str,
+    pub hidden_note: &'static str,
 }
 
 pub struct MirrorText {
@@ -141,6 +158,8 @@ pub struct AnchorText {
     pub first_seen_body: &'static str,
     pub unverifiable: &'static str,
     pub unverifiable_body: &'static str,
+    pub removed_title: &'static str,
+    pub removed_body: &'static str,
     pub export: &'static str,
     pub import: &'static str,
     /// "{}" is a path.
@@ -1063,6 +1082,8 @@ pub static EN: Strings = Strings {
         unverifiable: "The record could not be read",
         unverifiable_body: "A record exists but does not authenticate, so it says \
                             nothing either way. It has been left alone.",
+        removed_title: "The rollback record for this vault is gone",
+        removed_body: "This vault had a record on this computer, and now it has none. Either it was deleted — which is the first thing someone swapping in an older copy of the file would do — or this is an older copy from before the vault was first opened here. If you did not restore a backup or clear the settings, check that the entries are the ones you expect.",
         export: "Save the record…",
         import: "Load a record…",
         exported: "Record written to {}",
@@ -1131,6 +1152,26 @@ pub static EN: Strings = Strings {
         warning_master: "This password appears in published leaks. It is the first \
                          thing an attacker tries, whatever its length suggests.",
         warning_entry: "Appears in published leaks — change it wherever it is used.",
+    },
+    backups: BackupsText {
+        section: "Backups",
+        hint: "Every save keeps the five files before it, beside the vault. Restoring \
+               one puts it back as the vault and turns the current file into backup 1, \
+               so a restore can be undone the same way it was done.",
+        none: "No backups yet. The first appears with the next save.",
+        entry: "No. {} · {}",
+        restore: "Restore",
+        confirm_title: "Replace the vault file with this backup?",
+        confirm_body: "Backup {} becomes the vault file. The current file becomes backup \
+                       1, so nothing is lost. The vault locks; unlock it again to use the \
+                       restored version.",
+        restored_title: "Backup restored",
+        restored_body: "Unlock as usual. You will be asked whether to open a version older \
+                        than the one last seen here — say yes, that is the point.",
+        open_on_unlock: "Restore from a backup…",
+        hidden_note: "If a hidden vault already existed under another password, the file \
+                      as it was before is backup 1. It can be restored under Settings \
+                      → Backups until five more saves push it out.",
     },
 };
 
@@ -1579,6 +1620,8 @@ pub static RU: Strings = Strings {
         first_seen_body: "Хранилище открывается здесь впервые, сравнивать было не с чем. Это ровно тот момент, когда подменённый файл остался бы незамеченным. Если вы переносили хранилище, перенесите и запись.",
         unverifiable: "Запись не удалось прочитать",
         unverifiable_body: "Запись есть, но не подтверждается, значит ничего не говорит ни за, ни против. Её оставили как есть.",
+        removed_title: "Запись об откате для этого хранилища пропала",
+        removed_body: "На этом компьютере у этого хранилища уже была запись, а теперь её нет. Либо её удалили — именно так поступил бы тот, кто подсунул старую копию файла, — либо это старая копия из времени до того, как хранилище впервые открыли здесь. Если вы не восстанавливали резервную копию и не чистили настройки, проверьте, что записи в хранилище те, которые вы ожидаете.",
         export: "Сохранить запись…",
         import: "Загрузить запись…",
         exported: "Запись сохранена в {}",
@@ -1634,6 +1677,28 @@ pub static RU: Strings = Strings {
         warning_master: "Этот пароль есть в опубликованных утечках. Его пробуют первым, что бы ни говорила его длина.",
         warning_entry: "Есть в опубликованных утечках — смените его везде, где он используется.",
     },
+    backups: BackupsText {
+        section: "Резервные копии",
+        hint: "Каждое сохранение оставляет рядом с хранилищем пять предыдущих файлов. \
+               Восстановление делает копию файлом хранилища, а текущий файл — копией \
+               № 1, так что восстановление отменяется тем же способом.",
+        none: "Резервных копий пока нет. Первая появится при следующем сохранении.",
+        entry: "№ {} · {}",
+        restore: "Восстановить",
+        confirm_title: "Заменить файл хранилища этой копией?",
+        confirm_body: "Копия № {} станет файлом хранилища. Текущий файл станет \
+                       копией № 1, так что ничего не потеряется. Хранилище \
+                       заблокируется; откройте его снова, чтобы работать с восстановленной версией.",
+        restored_title: "Копия восстановлена",
+        restored_body: "Откройте хранилище как обычно. Программа спросит, точно ли \
+                        открывать версию старше последней виденной здесь, — скажите «да», \
+                        именно этого вы и хотели.",
+        open_on_unlock: "Восстановить из резервной копии…",
+        hidden_note: "Если под другим паролем уже было скрытое хранилище, файл \
+                      в прежнем виде — это копия № 1. Вернуть его можно в разделе \
+                      «Настройки → Резервные копии», пока его не вытеснили пять \
+                      следующих сохранений.",
+    },
 };
 
 #[cfg(test)]
@@ -1644,7 +1709,7 @@ mod tests {
     fn placeholders_match_between_languages() {
         // A translation that drops a "{}" silently loses the number it was
         // supposed to show, and one that adds an extra leaves "{}" on screen.
-        let pairs: [(&str, &str, &str); 46] = [
+        let pairs: [(&str, &str, &str); 48] = [
             ("shell.locks_in", EN.shell.locks_in, RU.shell.locks_in),
             (
                 "shell.clipboard_clears_in",
@@ -1699,6 +1764,8 @@ mod tests {
             ("recovery.made_on", EN.recovery.made_on, RU.recovery.made_on),
             ("entry.autotype_waiting", EN.entry.autotype_waiting, RU.entry.autotype_waiting),
             ("entry.autotype_done", EN.entry.autotype_done, RU.entry.autotype_done),
+            ("backups.entry", EN.backups.entry, RU.backups.entry),
+            ("backups.confirm_body", EN.backups.confirm_body, RU.backups.confirm_body),
         ];
         for (name, en, ru) in pairs {
             assert_eq!(

@@ -213,6 +213,12 @@ impl SlotFile {
 
     /// Try to open one slot. Failure is indistinguishable from "this slot is
     /// noise", which is the entire point.
+    /// The first bytes of a slot: its salt when it holds a vault, noise when
+    /// it does not. Nothing here can tell which, and nothing needs to.
+    pub fn slot_salt(&self, index: usize) -> &[u8] {
+        &self.slots[index][..SALT_LEN]
+    }
+
     pub fn open_slot(&self, index: usize, secret: &Secret) -> Result<Opened> {
         let slot = self
             .slots

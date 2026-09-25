@@ -51,6 +51,8 @@ pub struct SettingsState {
     pub recovery_verify_result: Option<bool>,
     /// Shown once, in a window, and dropped when it closes.
     pub recovery_shares: Vec<String>,
+    /// The backup a restore has been asked for and not yet confirmed.
+    pub restoring_backup: Option<usize>,
 
     pub kdf_memory_mib: u32,
     pub kdf_time_cost: u32,
@@ -86,6 +88,7 @@ impl SettingsState {
             recovery_verify_open: false,
             recovery_verify_result: None,
             recovery_shares: Vec::new(),
+            restoring_backup: None,
             kdf_memory_mib: config.kdf.memory_mib(),
             kdf_time_cost: config.kdf.t_cost,
             measured: None,
@@ -126,6 +129,8 @@ pub fn show_window(app: &mut App, ui: &mut egui::Ui) {
                     portability_section(app, ui, palette, strings);
                     ui.add_space(theme::space::MD);
                     mirror_section(app, ui, palette, strings);
+                    ui.add_space(theme::space::MD);
+                    backups_section(app, ui, palette, strings);
                     ui.add_space(theme::space::MD);
                     recovery_section(app, ui, palette, strings);
                     ui.add_space(theme::space::MD);
@@ -643,9 +648,11 @@ fn create_hidden_vault(app: &mut App) {
             app.settings.creating_hidden = false;
             app.settings.hidden_password = Zeroizing::new(String::new());
             app.settings.hidden_confirm = Zeroizing::new(String::new());
+            // Said now, while it is still true: the file as it was is
+            // backup 1, and five more saves will push it out.
             app.status = Some(Status::warn(
                 strings.hidden.created_title,
-                strings.hidden.created_body,
+                format!("{} {}", strings.hidden.created_body, strings.backups.hidden_note),
             ));
         }
         Err(e) => app.status = Some(Status::error(strings, &e)),
@@ -902,6 +909,107 @@ fn import_vault(app: &mut App) {
     }
 }
 
+
+// ------------------------------------------------------------------ backups
+
+/// How one backup is described in a list: its number, when, and how large.
+pub(crate) fn describe_backup(strings: &Strings, backup: &crate::vault::Backup) -> String {
+    let when = backup
+        .modified
+        .map(|at| {
+            chrono::DateTime::<chrono::Local>::from(at)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "\u{2014}".to_string());
+    fill2(
+        strings.backups.entry,
+        backup.index,
+        format!("{when} \u{b7} {}", human_bytes(backup.bytes as usize)),
+    )
+}
+
+/// The list, with a two-step restore. Returns the number the user has
+/// confirmed they want back, if any.
+///
+/// Two steps because a restore replaces the vault file. It can be undone —
+/// the replaced file becomes backup 1 — but only by someone who knows that,
+/// and a single stray click is the wrong way to find out.
+pub(crate) fn backups_list(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    strings: &Strings,
+    backups: &[crate::vault::Backup],
+    confirming: &mut Option<usize>,
+) -> Option<usize> {
+    if backups.is_empty() {
+        ui.label(theme::muted(palette, strings.backups.none));
+        return None;
+    }
+    let mut chosen = None;
+    for backup in backups {
+        ui.horizontal(|ui| {
+            ui.label(describe_backup(strings, backup));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if *confirming == Some(backup.index) {
+                    if ui.button(strings.common.cancel).clicked() {
+                        *confirming = None;
+                    }
+                    if widgets::danger_button(ui, palette, strings.backups.restore).clicked() {
+                        chosen = Some(backup.index);
+                    }
+                } else if ui.button(strings.backups.restore).clicked() {
+                    *confirming = Some(backup.index);
+                }
+            });
+        });
+    }
+    if let Some(index) = *confirming {
+        ui.add_space(theme::space::SM);
+        widgets::notice(
+            ui,
+            palette,
+            palette.warning,
+            Icon::Warning,
+            strings.backups.confirm_title,
+            &fill1(strings.backups.confirm_body, index),
+        );
+    }
+    chosen
+}
+
+fn backups_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &Strings) {
+    let Some(path) = app.session.vault().map(|v| v.path.clone()) else {
+        return;
+    };
+    let backups = crate::vault::list_backups(&path);
+
+    let mut chosen = None;
+    widgets::card(ui, palette, |ui| {
+        widgets::field_label_first(ui, palette, strings.backups.section);
+        widgets::hint(ui, palette, strings.backups.hint);
+        ui.add_space(theme::space::SM);
+        chosen = backups_list(ui, palette, strings, &backups, &mut app.settings.restoring_backup);
+    });
+
+    if let Some(index) = chosen {
+        restore_while_open(app, index);
+    }
+}
+
+/// Restore from inside the vault. Ends locked, whatever happens.
+fn restore_while_open(app: &mut App, index: usize) {
+    let strings = app.strings();
+    let outcome = app.session.restore_backup_and_lock(index);
+    app.settings.restoring_backup = None;
+    // Everything the lock button resets, reset here too. The session is
+    // already locked, so this only tidies the screen.
+    app.lock_now();
+    app.status = Some(match outcome {
+        Ok(()) => Status::warn(strings.backups.restored_title, strings.backups.restored_body),
+        Err(e) => Status::error(strings, &e),
+    });
+}
 
 // ------------------------------------------------------------- second copy
 
@@ -1210,6 +1318,16 @@ fn anchor_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: 
                     Icon::Warning,
                     strings.anchor.unverifiable,
                     strings.anchor.unverifiable_body,
+                );
+            }
+            crate::vault::AnchorState::Removed => {
+                widgets::notice(
+                    ui,
+                    palette,
+                    palette.danger,
+                    Icon::Warning,
+                    strings.anchor.removed_title,
+                    strings.anchor.removed_body,
                 );
             }
         }

@@ -16,6 +16,12 @@ rollback record all are that. Novel *primitives* are not.
 The second rule is smaller and follows from the first: a change to how something is sealed,
 derived or refused comes with a test that fails without it.
 
+A third, for the known-answer tests in `src/vectors.rs`: if one fails, do not update the
+expected value until you know which implementation is wrong. Those values come from
+`tools/reference_vault.py`, which is built on different libraries precisely so that the
+two can disagree. A change to the format means changing `docs/FORMAT.md`, the reference
+and the Rust together, and saying so.
+
 ## Before you file a bug
 
 Read the **Limits** section of the README. Seventeen things are listed there as knowingly
@@ -28,7 +34,7 @@ If it is a vulnerability rather than a bug, do not open an issue at all: see
 ## Running it
 
 ```bash
-cargo test            # 314 tests, about four minutes
+cargo test            # 338 tests, about four minutes
 cargo build --release
 ```
 
@@ -98,7 +104,7 @@ Argon2id, AES-256-GCM, XChaCha20-Poly1305, HKDF, схема Шамира над 
 ## Как запустить
 
 ```bash
-cargo test            # 314 тестов, около четырёх минут
+cargo test            # 338 тестов, около четырёх минут
 cargo build --release
 ```
 

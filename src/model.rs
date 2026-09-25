@@ -377,6 +377,18 @@ pub enum AuditProblem {
     BrokenAt(usize),
 }
 
+/// A random key, kept inside the vault, that the per-computer tags are made
+/// with. Its own type so that printing the vault data cannot print it.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MachineKey(pub String);
+
+impl std::fmt::Debug for MachineKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_empty() { "MachineKey(unset)" } else { "MachineKey([redacted])" })
+    }
+}
+
 /// The whole decrypted payload.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VaultData {
@@ -404,6 +416,17 @@ pub struct VaultData {
     /// worth storing.
     #[serde(default)]
     pub recovery_made_at: Option<String>,
+
+    /// Keys the tags in `anchored_on`. Made once, and kept here rather than
+    /// derived from the master key, so a change of password does not make
+    /// every computer look new.
+    #[serde(default)]
+    pub machine_key: MachineKey,
+    /// Which computers have held a rollback record for this vault, as keyed
+    /// tags of their identity rather than the identity itself. This is what
+    /// lets a missing record be told apart from a first visit.
+    #[serde(default)]
+    pub anchored_on: Vec<String>,
 }
 
 fn default_schema() -> u32 {
@@ -420,6 +443,8 @@ impl Default for VaultData {
             entries: Vec::new(),
             audit: Vec::new(),
             recovery_made_at: None,
+            machine_key: MachineKey::default(),
+            anchored_on: Vec::new(),
         }
     }
 }

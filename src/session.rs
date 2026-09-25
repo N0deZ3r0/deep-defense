@@ -331,6 +331,47 @@ impl Session {
     /// Returns an error only if *saving* failed. A stubborn dismount is
     /// handled by forcing it: by that point the secrets are already gone from
     /// memory, so the volume is just a mounted drive with ciphertext on it.
+    /// Replace the open vault's file with one of its backups, then lock.
+    ///
+    /// The order is the whole point. The backup is read first, because the
+    /// save that follows rotates the backups and would shift a different file
+    /// into the chosen number. Pending changes are saved, so nothing typed is
+    /// lost. The file is replaced before any volume is dismounted, so this
+    /// works inside a container too. And the vault is dropped without saving
+    /// afterwards, so its stale copy cannot overwrite what was just put back.
+    pub fn restore_backup_and_lock(&mut self, index: usize) -> Result<()> {
+        self.clipboard.clear_now();
+        let Some(mut open) = self.open.take() else {
+            return Err(Error::vault("the vault is not open"));
+        };
+        let path = open.vault.path.clone();
+        let source = crate::vault::backup_path(&path, index);
+        let bytes = match std::fs::read(&source) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.open = Some(open);
+                return Err(Error::io(source, e));
+            }
+        };
+        if open.vault.is_dirty() {
+            if let Err(e) = open.vault.save() {
+                self.open = Some(open);
+                return Err(e);
+            }
+        }
+
+        let restored = crate::vault::restore_backup_bytes(&path, &bytes);
+
+        drop(open.vault);
+        if let Some(container) = open.container {
+            drop(container.password);
+            if !self.veracrypt.dismount(&container.mount, false) {
+                self.veracrypt.dismount(&container.mount, true);
+            }
+        }
+        restored
+    }
+
     pub fn lock(&mut self) -> Result<()> {
         self.clipboard.clear_now();
         let Some(mut open) = self.open.take() else {
@@ -663,6 +704,45 @@ mod tests {
         fn new(tag: &str) -> Self {
             Self(crate::config::test_home::TestHome::new(tag))
         }
+    }
+
+    #[test]
+    fn restoring_from_inside_saves_first_and_leaves_nothing_stale() {
+        // A change typed just before the restore is saved rather than lost,
+        // and the vault left behind in memory cannot write over the file that
+        // was put back.
+        let scratch = Scratch::new("restore-session");
+        let config = standalone_config(scratch.0.path());
+        let password = Secret::from_str("restore me");
+        let absent = VeraCrypt {
+            binary: None,
+            format_binary: None,
+        };
+
+        let mut open = create_vault(&absent, &config, &password, 0).unwrap();
+        open.vault.add(crate::model::Entry::new("Saved")).unwrap();
+        open.vault.save().unwrap();
+        let mut session = Session::new(config.clone());
+        session.adopt(open);
+
+        // Unsaved at the moment of the restore.
+        session
+            .vault_mut()
+            .unwrap()
+            .add(crate::model::Entry::new("Typed"))
+            .unwrap();
+        session.restore_backup_and_lock(1).unwrap();
+        assert!(session.vault().is_none(), "locked");
+
+        // Backup 1 at the moment of the call: the file before "Saved".
+        let restored = unlock(&absent, &config, &password, true).unwrap();
+        assert!(restored.vault.data.find("Saved").is_none());
+        drop(restored);
+
+        // And the change typed before the restore survived, one step back.
+        crate::vault::restore_backup(&config.vault_path, 1).unwrap();
+        let typed = unlock(&absent, &config, &password, true).unwrap();
+        assert!(typed.vault.data.find("Typed").is_some());
     }
 
     #[test]

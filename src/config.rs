@@ -59,6 +59,8 @@ pub(crate) mod test_home {
             // A panicking test poisons the lock. What it guards is one
             // environment variable, so taking it anyway is right.
             let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            // A previous test may have pretended to be another computer.
+            std::env::remove_var("DEEP_DEFENSE_TEST_MACHINE");
             let path = std::env::temp_dir()
                 .join(format!("dd-test-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
@@ -82,6 +84,7 @@ pub(crate) mod test_home {
     impl Drop for TestHome {
         fn drop(&mut self) {
             std::env::remove_var("DEEP_DEFENSE_HOME");
+            std::env::remove_var("DEEP_DEFENSE_TEST_MACHINE");
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }

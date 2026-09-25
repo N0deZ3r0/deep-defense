@@ -42,6 +42,103 @@ fn anchor_path() -> PathBuf {
     app_dir().join(ANCHOR_FILENAME)
 }
 
+/// The version of the store written since there has been a record per slot.
+const ANCHOR_STORE_VERSION: u32 = 2;
+const ANCHOR_SEAL_INFO: &[u8] = b"deep-defense/rollback-anchor/seal/v2";
+const ANCHOR_NONCE_LEN: usize = 24;
+/// Nonce, the revision as eight bytes, and the tag.
+const ANCHOR_SEALED_LEN: usize = ANCHOR_NONCE_LEN + 8 + 16;
+/// Years of password changes across several vaults. Past it, the records
+/// untouched longest go first.
+const MAX_ANCHOR_ENTRIES: usize = 64;
+const MACHINE_TAG_CONTEXT: &[u8] = b"deep-defense/machine/v1";
+
+/// One slot's record in the store.
+///
+/// The revision is sealed rather than written out: a plain number would show
+/// which records belong to vaults in use and which are placeholders, and a
+/// placeholder for a slot is only worth anything if it cannot be told apart
+/// from a real record.
+#[derive(Clone, Serialize, Deserialize)]
+struct AnchorEntry {
+    id: String,
+    sealed: String,
+}
+
+/// Every record this computer holds, for every vault file it has seen.
+#[derive(Default, Serialize, Deserialize)]
+struct AnchorStore {
+    version: u32,
+    entries: Vec<AnchorEntry>,
+}
+
+/// What is on disk where the store should be.
+enum StoredAnchors {
+    Missing,
+    /// Present, but not something this program wrote. Kept as evidence rather
+    /// than overwritten on the spot.
+    Unreadable,
+    Store(AnchorStore),
+    /// The single record earlier builds wrote.
+    Legacy(Anchor),
+}
+
+fn read_anchors() -> StoredAnchors {
+    let text = match std::fs::read_to_string(anchor_path()) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return StoredAnchors::Missing,
+        Err(_) => return StoredAnchors::Unreadable,
+    };
+    if let Ok(store) = serde_json::from_str::<AnchorStore>(&text) {
+        if store.version == ANCHOR_STORE_VERSION {
+            return StoredAnchors::Store(store);
+        }
+    }
+    match serde_json::from_str::<Anchor>(&text) {
+        Ok(anchor) => StoredAnchors::Legacy(anchor),
+        Err(_) => StoredAnchors::Unreadable,
+    }
+}
+
+/// The identifier a slot has, from its salt and its position.
+///
+/// Hashed rather than used directly so the store, which lives outside the
+/// vault, never carries a copy of a salt.
+fn id_for(salt: &[u8], slot: usize) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"deep-defense/vault-id/v2");
+    digest.update(salt);
+    digest.update([slot as u8]);
+    hex(&digest.finalize()[..16])
+}
+
+/// What an absent record means, given whether one was ever made here.
+fn absent_record(seen_here: bool) -> AnchorState {
+    if seen_here {
+        AnchorState::Removed
+    } else {
+        AnchorState::FirstSeenHere
+    }
+}
+
+/// Random bytes the shape of a sealed record, for slots this vault is not.
+fn placeholder_seal() -> Option<String> {
+    let mut raw = [0u8; ANCHOR_SEALED_LEN];
+    crypto::random_bytes(&mut raw).ok()?;
+    Some(BASE64.encode(raw))
+}
+
+/// This computer's identity, as far as the vault is concerned.
+fn this_machine_id() -> Option<String> {
+    // Tests move a vault between "computers" without leaving the one they run
+    // on; nothing outside a test build reads this.
+    #[cfg(test)]
+    if let Ok(forced) = std::env::var("DEEP_DEFENSE_TEST_MACHINE") {
+        return Some(forced);
+    }
+    crate::platform::machine_id()
+}
+
 /// What the rollback check was actually able to establish.
 ///
 /// The check used to answer `Ok(())` in five different situations, only one of
@@ -59,6 +156,11 @@ pub enum AnchorState {
     FirstSeenHere,
     /// An anchor exists but could not be authenticated, so it says nothing.
     Unverifiable,
+    /// This vault has had a record on this computer before, and now there is
+    /// none. Either it was deleted — which is exactly what someone swapping
+    /// in an older file would do first — or this is an older copy of the file,
+    /// from before it was first opened here. Neither should pass in silence.
+    Removed,
 }
 
 impl AnchorState {
@@ -106,6 +208,70 @@ fn rotate_backups_at(path: &Path) {
         }
     }
     let _ = std::fs::copy(path, backup_path_for(path, 1));
+}
+
+/// One of the numbered backups beside a vault file.
+#[derive(Debug, Clone)]
+pub struct Backup {
+    /// 1 is the newest.
+    pub index: usize,
+    pub path: PathBuf,
+    pub modified: Option<std::time::SystemTime>,
+    pub bytes: u64,
+}
+
+/// Where backup `index` of `vault_path` lives.
+pub fn backup_path(vault_path: &Path, index: usize) -> PathBuf {
+    backup_path_for(vault_path, index)
+}
+
+/// The backups that exist beside `vault_path`, newest first.
+pub fn list_backups(vault_path: &Path) -> Vec<Backup> {
+    (1..=BACKUP_COUNT)
+        .filter_map(|index| {
+            let path = backup_path_for(vault_path, index);
+            let meta = std::fs::metadata(&path).ok()?;
+            meta.is_file().then(|| Backup {
+                index,
+                modified: meta.modified().ok(),
+                bytes: meta.len(),
+                path,
+            })
+        })
+        .collect()
+}
+
+/// Put backup `index` back as the vault file. Nothing may have the vault open.
+pub fn restore_backup(vault_path: &Path, index: usize) -> Result<()> {
+    if !(1..=BACKUP_COUNT).contains(&index) {
+        return Err(Error::format("there is no backup with that number"));
+    }
+    let source = backup_path_for(vault_path, index);
+    let bytes = std::fs::read(&source).map_err(|e| Error::io(source.clone(), e))?;
+    restore_backup_bytes(vault_path, &bytes)
+}
+
+/// Make `bytes` the vault file.
+///
+/// The bytes are checked to be a vault file before anything on disk is
+/// touched: restoring something that is not one would replace the real vault
+/// with a file that opens nothing. The file being replaced becomes backup 1,
+/// so a restore can be undone the same way it was done.
+///
+/// Opening the result will be reported as a rollback, correctly — it is older
+/// than the record says it should be — and the usual prompt asks whether that
+/// was intended.
+pub fn restore_backup_bytes(vault_path: &Path, bytes: &[u8]) -> Result<()> {
+    SlotFile::parse(bytes)?;
+    rotate_backups_at(vault_path);
+    let tmp = vault_path.with_extension("ddv.restore-tmp");
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp).map_err(|e| Error::io(tmp.clone(), e))?;
+        file.write_all(bytes).map_err(|e| Error::io(tmp.clone(), e))?;
+        file.sync_all().map_err(|e| Error::io(tmp.clone(), e))?;
+    }
+    crate::platform::rename_durably(&tmp, vault_path)
 }
 
 /// An open vault. Build one with [`Vault::create`] or [`Vault::open`].
@@ -198,6 +364,7 @@ impl Vault {
             mirror: None,
             mirror_error: None,
         };
+        vault.note_this_machine();
         vault.save()?;
         Ok(vault)
     }
@@ -240,6 +407,14 @@ impl Vault {
         } else {
             vault.check_rollback()?
         };
+
+        // The first open on a computer is saved at once, so that from here on
+        // a missing record on this computer means something. Once per computer
+        // per vault; a failure only postpones it to the next save.
+        if vault.note_this_machine() {
+            vault.dirty = true;
+            let _ = vault.save();
+        }
         Ok(vault)
     }
 
@@ -344,16 +519,27 @@ impl Vault {
     // ------------------------------------------------------- rollback anchor
 
     /// Stable per-slot identifier, derived from the slot's (secret) salt.
-    ///
-    /// Hashed rather than used directly so the anchor file, which lives
-    /// outside the vault, never carries a copy of the salt.
     fn vault_id(&self) -> String {
-        let mut digest = Sha256::new();
-        digest.update(b"deep-defense/vault-id/v2");
-        digest.update(&self.salt);
-        digest.update([self.slot as u8]);
-        hex(&digest.finalize()[..16])
+        id_for(&self.salt, self.slot)
     }
+
+    /// The identifier of every slot in this file, as if each held a vault.
+    ///
+    /// Computable by anyone holding the file: the first bytes of a slot are
+    /// its salt when it holds a vault and random noise when it does not, and
+    /// the two cannot be told apart — so neither can the identifiers.
+    fn slot_ids(&self) -> Vec<String> {
+        (0..slots::SLOT_COUNT)
+            .map(|index| {
+                if index == self.slot {
+                    self.vault_id()
+                } else {
+                    id_for(self.file.slot_salt(index), index)
+                }
+            })
+            .collect()
+    }
+
     fn anchor_mac(&self, revision: u64) -> Result<Vec<u8>> {
         let mut mac = <Hmac<Sha256> as MacInit>::new_from_slice(self.master_key.as_bytes())
             .map_err(|e| Error::crypto(format!("anchor MAC setup failed: {e}")))?;
@@ -363,68 +549,221 @@ impl Vault {
         Ok(mac.finalize().into_bytes().to_vec())
     }
 
+    /// The key the stored revision is sealed under.
+    fn anchor_key(&self) -> Option<Key> {
+        let hkdf = hkdf::Hkdf::<Sha256>::new(None, self.master_key.as_bytes());
+        let mut key = Key::zeroed();
+        hkdf.expand(ANCHOR_SEAL_INFO, key.as_mut()).ok()?;
+        Some(key)
+    }
+
+    fn seal_revision(&self, id: &str, revision: u64) -> Option<String> {
+        use chacha20poly1305::aead::{Aead, Payload};
+        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
+
+        let key = self.anchor_key()?;
+        let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes()).ok()?;
+        // Random, not derived: the same key seals this record every time it is
+        // written, so the nonce is what keeps two writes from colliding.
+        let mut nonce = [0u8; ANCHOR_NONCE_LEN];
+        crypto::random_bytes(&mut nonce).ok()?;
+        let body = cipher
+            .encrypt(
+                &XNonce::from(nonce),
+                Payload {
+                    msg: &revision.to_be_bytes(),
+                    aad: id.as_bytes(),
+                },
+            )
+            .ok()?;
+        let mut raw = nonce.to_vec();
+        raw.extend_from_slice(&body);
+        Some(BASE64.encode(raw))
+    }
+
+    fn open_revision(&self, entry: &AnchorEntry) -> Option<u64> {
+        use chacha20poly1305::aead::{Aead, Payload};
+        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
+
+        let raw = BASE64.decode(&entry.sealed).ok()?;
+        if raw.len() != ANCHOR_SEALED_LEN {
+            return None;
+        }
+        let (nonce, body) = raw.split_at(ANCHOR_NONCE_LEN);
+        let nonce: [u8; ANCHOR_NONCE_LEN] = nonce.try_into().ok()?;
+        let key = self.anchor_key()?;
+        let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes()).ok()?;
+        let plain = cipher
+            .decrypt(
+                &XNonce::from(nonce),
+                Payload {
+                    msg: body,
+                    aad: entry.id.as_bytes(),
+                },
+            )
+            .ok()?;
+        let bytes: [u8; 8] = plain.as_slice().try_into().ok()?;
+        Some(u64::from_be_bytes(bytes))
+    }
+
     /// Record the current revision. Failure here degrades rollback detection
     /// but must never stop the user from saving their passwords.
+    ///
+    /// Writes a record for every slot of this file, not just its own: a real
+    /// one for this vault, and a placeholder for any other slot that has none
+    /// yet. That way the store looks the same whether or not a hidden vault
+    /// exists, and a hidden vault opened here later finds a slot waiting.
+    /// A record some other vault wrote is never touched.
     fn write_anchor(&self) {
-        let Ok(mac) = self.anchor_mac(self.data.revision) else {
+        let own = self.vault_id();
+        let Some(sealed) = self.seal_revision(&own, self.data.revision) else {
             return;
         };
-        let anchor = Anchor {
-            vault_id: self.vault_id(),
-            revision: self.data.revision,
-            mac: BASE64.encode(mac),
+        let mut store = match read_anchors() {
+            StoredAnchors::Store(store) => store,
+            // An older single record, or something unreadable: whatever it
+            // said about this vault, the record written now says it better.
+            _ => AnchorStore::default(),
         };
+        store.version = ANCHOR_STORE_VERSION;
+
+        // This file's records go to the end, in slot order, so the ones
+        // untouched longest are the first to go when the store is full.
+        let mut this_file = Vec::with_capacity(slots::SLOT_COUNT);
+        for id in self.slot_ids() {
+            let existing = store
+                .entries
+                .iter()
+                .position(|entry| entry.id == id)
+                .map(|at| store.entries.remove(at));
+            let entry = if id == own {
+                AnchorEntry {
+                    id,
+                    sealed: sealed.clone(),
+                }
+            } else if let Some(entry) = existing {
+                entry
+            } else {
+                let Some(sealed) = placeholder_seal() else {
+                    return;
+                };
+                AnchorEntry { id, sealed }
+            };
+            this_file.push(entry);
+        }
+        store.entries.extend(this_file);
+        let excess = store.entries.len().saturating_sub(MAX_ANCHOR_ENTRIES);
+        store.entries.drain(..excess);
+
         if ensure_app_dir().is_err() {
             return;
         }
-        if let Ok(text) = serde_json::to_string(&anchor) {
-            let path = anchor_path();
-            let tmp = path.with_extension("anchor.tmp");
-            if std::fs::write(&tmp, text).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
+        let Ok(text) = serde_json::to_string(&store) else {
+            return;
+        };
+        let path = anchor_path();
+        let tmp = path.with_extension("anchor.tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = crate::platform::rename_durably(&tmp, &path);
         }
     }
 
     fn check_rollback(&self) -> Result<AnchorState> {
-        let text = match std::fs::read_to_string(anchor_path()) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                self.write_anchor(); // first run on this machine
-                return Ok(AnchorState::FirstSeenHere);
+        // Whether this vault has had a record on this computer before — the
+        // one fact that separates "the record was deleted" from "never here".
+        let seen_here = self.seen_on_this_machine();
+        let own = self.vault_id();
+
+        let state = match read_anchors() {
+            // Kept as it is: whatever put it there, overwriting it now would
+            // destroy the only evidence.
+            StoredAnchors::Unreadable => return Ok(AnchorState::Unverifiable),
+            StoredAnchors::Missing => absent_record(seen_here),
+            StoredAnchors::Legacy(anchor) => {
+                if anchor.vault_id != own {
+                    absent_record(seen_here)
+                } else {
+                    let genuine = BASE64
+                        .decode(&anchor.mac)
+                        .ok()
+                        .zip(self.anchor_mac(anchor.revision).ok())
+                        .is_some_and(|(recorded, expected)| constant_time_eq(&expected, &recorded));
+                    if !genuine {
+                        return Ok(AnchorState::Unverifiable);
+                    }
+                    if anchor.revision > self.data.revision {
+                        return Err(Error::Rollback {
+                            on_disk: self.data.revision,
+                            expected: anchor.revision,
+                        });
+                    }
+                    AnchorState::Verified
+                }
             }
-            // Present but unreadable: damaged, locked, or not text at all.
-            // That is not the same as never having seen this vault, and
-            // reporting it as a first run would hide the difference.
-            Err(_) => return Ok(AnchorState::Unverifiable),
+            StoredAnchors::Store(store) => match store.entries.iter().find(|entry| entry.id == own) {
+                None => absent_record(seen_here),
+                Some(entry) => match self.open_revision(entry) {
+                    Some(revision) if revision > self.data.revision => {
+                        return Err(Error::Rollback {
+                            on_disk: self.data.revision,
+                            expected: revision,
+                        })
+                    }
+                    Some(_) => AnchorState::Verified,
+                    // A record under this vault's identifier that its key
+                    // cannot open. After this vault has been here, that is a
+                    // record replaced or tampered with. Before, it is the
+                    // placeholder the other slot of this file left for it.
+                    None if seen_here => return Ok(AnchorState::Unverifiable),
+                    None => AnchorState::FirstSeenHere,
+                },
+            },
         };
-        let Ok(anchor) = serde_json::from_str::<Anchor>(&text) else {
-            return Ok(AnchorState::Unverifiable);
-        };
-        if anchor.vault_id != self.vault_id() {
-            // The anchor belongs to a different vault or a different slot, so
-            // it cannot speak for this one. Record ours beside it.
-            self.write_anchor();
-            return Ok(AnchorState::FirstSeenHere);
+        self.write_anchor();
+        Ok(state)
+    }
+
+    // ------------------------------------------------------ which computers
+
+    /// This computer's tag for this vault.
+    ///
+    /// Keyed with a secret kept inside the vault, so the list of tags says
+    /// nothing to anyone who has not opened it — and even then only answers
+    /// "was it this machine?", never "which machines were they?".
+    fn machine_tag(&self) -> Option<String> {
+        let key = unhex(&self.data.machine_key.0)?;
+        let machine = this_machine_id()?;
+        let mut mac = <Hmac<Sha256> as MacInit>::new_from_slice(&key).ok()?;
+        mac.update(MACHINE_TAG_CONTEXT);
+        mac.update(machine.as_bytes());
+        Some(hex(&mac.finalize().into_bytes()[..16]))
+    }
+
+    fn seen_on_this_machine(&self) -> bool {
+        self.machine_tag()
+            .is_some_and(|tag| self.data.anchored_on.contains(&tag))
+    }
+
+    /// Add this computer to the vault's list. Returns whether anything changed.
+    fn note_this_machine(&mut self) -> bool {
+        if this_machine_id().is_none() {
+            return false;
         }
-        let Ok(recorded_mac) = BASE64.decode(&anchor.mac) else {
-            return Ok(AnchorState::Unverifiable);
-        };
-        let Ok(expected) = self.anchor_mac(anchor.revision) else {
-            return Ok(AnchorState::Unverifiable);
-        };
-        // A forged or corrupted anchor is indistinguishable from one written
-        // by a different key; in both cases we have nothing to compare to.
-        if !constant_time_eq(&expected, &recorded_mac) {
-            return Ok(AnchorState::Unverifiable);
+        if self.data.machine_key.0.is_empty() {
+            let mut key = [0u8; 32];
+            if crypto::random_bytes(&mut key).is_err() {
+                return false;
+            }
+            self.data.machine_key = crate::model::MachineKey(hex(&key));
         }
-        if anchor.revision > self.data.revision {
-            return Err(Error::Rollback {
-                on_disk: self.data.revision,
-                expected: anchor.revision,
-            });
+        let Some(tag) = self.machine_tag() else {
+            return false;
+        };
+        if self.data.anchored_on.contains(&tag) {
+            return false;
         }
-        Ok(AnchorState::Verified)
+        self.data.anchored_on.push(tag);
+        true
     }
 
     /// Write the anchor somewhere the user can carry it.
@@ -879,6 +1218,16 @@ impl Vault {
             None,
         )
     }
+}
+
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
+        .collect()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1570,6 +1919,7 @@ mod tests {
         drop(vault);
 
         // Simulate carrying the file to a machine that has never seen it.
+        std::env::set_var("DEEP_DEFENSE_TEST_MACHINE", "another computer");
         std::fs::remove_file(anchor_path()).unwrap();
         let moved = Vault::open(&dir.vault(), &secret, false).unwrap();
         assert_eq!(
@@ -1629,6 +1979,7 @@ mod tests {
         drop(vault);
 
         // A machine that has never seen this vault.
+        std::env::set_var("DEEP_DEFENSE_TEST_MACHINE", "another computer");
         std::fs::remove_file(anchor_path()).unwrap();
         let mut moved = Vault::open(&dir.vault(), &secret, false).unwrap();
         assert_eq!(moved.anchor_state(), AnchorState::FirstSeenHere);
@@ -2021,5 +2372,251 @@ mod tests {
             !vault.secret_opens_this_slot(&old),
             "recovery pieces made before the change must report as stale"
         );
+    }
+
+    // ---------------------------------------------------- restoring backups
+
+    #[test]
+    fn a_backup_can_be_restored_and_the_restore_undone() {
+        let dir = TempDir::new("restore-undo");
+        let secret = Secret::from_str("restore me");
+        let mut vault = small_vault(&dir.vault(), &secret);
+        vault.add(sample_entry("First", "one")).unwrap();
+        vault.save().unwrap();
+        vault.add(sample_entry("Second", "two")).unwrap();
+        vault.save().unwrap();
+        drop(vault);
+
+        restore_backup(&dir.vault(), 1).unwrap();
+        let older = Vault::open(&dir.vault(), &secret, true).unwrap();
+        let names: Vec<_> = older.data.entries.iter().map(|e| e.name.clone()).collect();
+        assert_eq!(names, vec!["First".to_string()], "the file before the last save");
+        drop(older);
+
+        // The file that was replaced became backup 1, so this undoes it.
+        restore_backup(&dir.vault(), 1).unwrap();
+        let newer = Vault::open(&dir.vault(), &secret, true).unwrap();
+        assert_eq!(newer.data.entries.len(), 2);
+    }
+
+    /// The case this exists for.
+    #[test]
+    fn a_hidden_vault_overwritten_by_a_second_one_comes_back_from_the_backup() {
+        let dir = TempDir::new("restore-hidden");
+        let decoy_secret = Secret::from_str("the decoy");
+        let first_secret = Secret::from_str("the first hidden one");
+        let second_secret = Secret::from_str("the second hidden one");
+
+        let decoy = small_vault(&dir.vault(), &decoy_secret);
+        let mut first = decoy.create_hidden(&first_secret).unwrap();
+        first.add(sample_entry("Real", "irreplaceable")).unwrap();
+        first.save().unwrap();
+        drop(first);
+        drop(decoy);
+
+        let decoy = Vault::open(&dir.vault(), &decoy_secret, true).unwrap();
+        let _second = decoy.create_hidden(&second_secret).unwrap();
+        assert!(Vault::open(&dir.vault(), &first_secret, true).is_err(), "gone");
+
+        // The save that overwrote it copied the file aside first.
+        restore_backup(&dir.vault(), 1).unwrap();
+        let back = Vault::open(&dir.vault(), &first_secret, true).unwrap();
+        assert_eq!(back.data.entries[0].password, "irreplaceable");
+        assert!(Vault::open(&dir.vault(), &decoy_secret, true).is_ok());
+    }
+
+    #[test]
+    fn something_that_is_not_a_vault_is_never_restored_over_one() {
+        let dir = TempDir::new("restore-garbage");
+        let secret = Secret::from_str("restore me");
+        let mut vault = small_vault(&dir.vault(), &secret);
+        vault.save().unwrap();
+        drop(vault);
+
+        std::fs::write(backup_path(&dir.vault(), 1), b"not a vault at all").unwrap();
+        let before = std::fs::read(dir.vault()).unwrap();
+        assert!(restore_backup(&dir.vault(), 1).is_err());
+        assert_eq!(std::fs::read(dir.vault()).unwrap(), before, "untouched");
+    }
+
+    #[test]
+    fn there_is_no_backup_zero_and_none_past_the_last() {
+        let dir = TempDir::new("restore-range");
+        let secret = Secret::from_str("restore me");
+        drop(small_vault(&dir.vault(), &secret));
+        assert!(restore_backup(&dir.vault(), 0).is_err());
+        assert!(restore_backup(&dir.vault(), BACKUP_COUNT + 1).is_err());
+    }
+
+    #[test]
+    fn a_restored_older_file_is_announced_as_a_rollback() {
+        // Which is how the interface comes to ask "did you mean to open an
+        // older version?" — the answer the person restoring expects to give.
+        let dir = TempDir::new("restore-rollback");
+        let secret = Secret::from_str("restore me");
+        let mut vault = small_vault(&dir.vault(), &secret);
+        for index in 0..3 {
+            vault.add(sample_entry(&format!("Site {index}"), "pw")).unwrap();
+            vault.save().unwrap();
+        }
+        drop(vault);
+
+        restore_backup(&dir.vault(), 2).unwrap();
+        let refused = Vault::open(&dir.vault(), &secret, false).unwrap_err();
+        assert!(matches!(refused, Error::Rollback { .. }), "got {refused}");
+        assert!(Vault::open(&dir.vault(), &secret, true).is_ok());
+    }
+
+    #[test]
+    fn the_backups_are_listed_newest_first() {
+        let dir = TempDir::new("restore-list");
+        let secret = Secret::from_str("restore me");
+        let mut vault = small_vault(&dir.vault(), &secret);
+        vault.save().unwrap();
+        vault.save().unwrap();
+        vault.save().unwrap();
+        let listed = list_backups(&dir.vault());
+        let indices: Vec<_> = listed.iter().map(|b| b.index).collect();
+        assert_eq!(indices, vec![1, 2, 3]);
+        assert!(listed.iter().all(|b| b.bytes > 0 && b.path.is_file()));
+    }
+
+    // ------------------------------------------------ records per slot
+
+    #[test]
+    fn a_deleted_record_on_a_computer_that_had_one_is_reported() {
+        // What someone swapping in an older file would do first. It used to be
+        // indistinguishable from a first run.
+        let dir = TempDir::new("anchor-removed");
+        let secret = Secret::from_str("anchor me");
+        drop(small_vault(&dir.vault(), &secret));
+
+        std::fs::remove_file(anchor_path()).unwrap();
+        let opened = Vault::open(&dir.vault(), &secret, false).unwrap();
+        assert_eq!(opened.anchor_state(), AnchorState::Removed);
+        assert!(opened.anchor_state().is_noteworthy());
+        drop(opened);
+
+        let again = Vault::open(&dir.vault(), &secret, false).unwrap();
+        assert_eq!(again.anchor_state(), AnchorState::Verified, "recorded again");
+    }
+
+    #[test]
+    fn a_decoy_and_a_hidden_vault_no_longer_overwrite_each_others_record() {
+        // They shared one record before, and each open replaced the other's:
+        // for anyone with a hidden vault, rollback protection covered neither.
+        let dir = TempDir::new("anchor-both");
+        let decoy_secret = Secret::from_str("the decoy");
+        let hidden_secret = Secret::from_str("the hidden one");
+
+        let decoy = small_vault(&dir.vault(), &decoy_secret);
+        drop(decoy.create_hidden(&hidden_secret).unwrap());
+        drop(decoy);
+
+        for secret in [&decoy_secret, &hidden_secret, &decoy_secret, &hidden_secret] {
+            let opened = Vault::open(&dir.vault(), secret, false).unwrap();
+            assert_eq!(opened.anchor_state(), AnchorState::Verified);
+        }
+    }
+
+    #[test]
+    fn a_rolled_back_hidden_vault_is_caught_while_its_decoy_is_not_blamed() {
+        let dir = TempDir::new("anchor-hidden-rollback");
+        let decoy_secret = Secret::from_str("the decoy");
+        let hidden_secret = Secret::from_str("the hidden one");
+
+        let decoy = small_vault(&dir.vault(), &decoy_secret);
+        let mut hidden = decoy.create_hidden(&hidden_secret).unwrap();
+        drop(decoy);
+        hidden.add(sample_entry("Earlier", "pw")).unwrap();
+        hidden.save().unwrap();
+        let earlier = std::fs::read(dir.vault()).unwrap();
+        hidden.add(sample_entry("Later", "pw")).unwrap();
+        hidden.save().unwrap();
+        drop(hidden);
+
+        // The older file goes back. Only the hidden vault moved between the
+        // two, so only the hidden vault is behind its record.
+        std::fs::write(dir.vault(), &earlier).unwrap();
+        let refused = Vault::open(&dir.vault(), &hidden_secret, false).unwrap_err();
+        assert!(matches!(refused, Error::Rollback { .. }), "got {refused}");
+        let decoy = Vault::open(&dir.vault(), &decoy_secret, false).unwrap();
+        assert_eq!(decoy.anchor_state(), AnchorState::Verified);
+    }
+
+    #[test]
+    fn the_store_holds_a_record_for_every_slot_whether_or_not_it_is_used() {
+        // A file with no hidden vault must leave the same traces as one with.
+        let dir = TempDir::new("anchor-shape");
+        let secret = Secret::from_str("anchor me");
+        drop(small_vault(&dir.vault(), &secret));
+
+        let text = std::fs::read_to_string(anchor_path()).unwrap();
+        let store: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let entries = store["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), slots::SLOT_COUNT);
+        let lengths: Vec<_> = entries
+            .iter()
+            .map(|e| e["sealed"].as_str().unwrap().len())
+            .collect();
+        assert!(lengths.windows(2).all(|pair| pair[0] == pair[1]), "{lengths:?}");
+        assert_ne!(entries[0]["id"], entries[1]["id"]);
+        assert!(
+            !text.contains("revision"),
+            "a plain revision number would show which records are real"
+        );
+    }
+
+    #[test]
+    fn a_hidden_vault_new_to_a_computer_is_not_taken_for_tampering() {
+        // On a computer where only the decoy has been opened, the hidden
+        // vault's slot holds the placeholder the decoy left. The first open
+        // there must read that as a first visit, not as a forged record.
+        let dir = TempDir::new("anchor-placeholder");
+        let decoy_secret = Secret::from_str("the decoy");
+        let hidden_secret = Secret::from_str("the hidden one");
+        let decoy = small_vault(&dir.vault(), &decoy_secret);
+        drop(decoy.create_hidden(&hidden_secret).unwrap());
+        drop(decoy);
+
+        std::env::set_var("DEEP_DEFENSE_TEST_MACHINE", "a second computer");
+        std::fs::remove_file(anchor_path()).unwrap();
+        drop(Vault::open(&dir.vault(), &decoy_secret, false).unwrap());
+
+        let hidden = Vault::open(&dir.vault(), &hidden_secret, false).unwrap();
+        assert_eq!(hidden.anchor_state(), AnchorState::FirstSeenHere);
+        drop(hidden);
+        let again = Vault::open(&dir.vault(), &hidden_secret, false).unwrap();
+        assert_eq!(again.anchor_state(), AnchorState::Verified);
+    }
+
+    #[test]
+    fn a_record_from_before_the_store_existed_is_carried_over() {
+        let dir = TempDir::new("anchor-legacy");
+        let secret = Secret::from_str("anchor me");
+        let vault = small_vault(&dir.vault(), &secret);
+        // The single-record form earlier builds wrote, written where they
+        // wrote it.
+        vault.export_anchor(&anchor_path()).unwrap();
+        drop(vault);
+
+        let opened = Vault::open(&dir.vault(), &secret, false).unwrap();
+        assert_eq!(opened.anchor_state(), AnchorState::Verified);
+        let text = std::fs::read_to_string(anchor_path()).unwrap();
+        assert!(text.contains("\"version\":2"), "rewritten in the new form");
+    }
+
+    #[test]
+    fn the_vault_names_no_computer_it_can_be_read_back_from() {
+        let dir = TempDir::new("anchor-tags");
+        let secret = Secret::from_str("anchor me");
+        let vault = small_vault(&dir.vault(), &secret);
+        let machine = this_machine_id().expect("tests run somewhere");
+        assert_eq!(vault.data.anchored_on.len(), 1);
+        assert!(
+            !vault.data.anchored_on[0].contains(&machine),
+            "a tag, never the identity itself"
+        );
+        assert!(!format!("{:?}", vault.data).contains(&vault.data.machine_key.0));
     }
 }

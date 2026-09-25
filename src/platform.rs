@@ -141,6 +141,52 @@ pub fn type_text(_text: &str) -> crate::errors::Result<()> {
     ))
 }
 
+// ------------------------------------------------------------ machine identity
+
+/// A stable identifier for this computer, or `None` if there is none to read.
+///
+/// On Windows, `MachineGuid` — generated when Windows is installed, readable
+/// without administrator rights, and the same for every user of the machine.
+/// It is never stored as it is: the vault keeps only a keyed tag of it, so a
+/// vault opened elsewhere carries no identifier of this computer, and a vault
+/// that is never opened carries nothing at all.
+#[cfg(windows)]
+pub fn machine_id() -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+
+    let subkey: Vec<u16> = "SOFTWARE\\Microsoft\\Cryptography\0".encode_utf16().collect();
+    let value: Vec<u16> = "MachineGuid\0".encode_utf16().collect();
+    let mut buffer = [0u16; 128];
+    let mut size = (buffer.len() * 2) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let units = (size as usize / 2).min(buffer.len());
+    let id = String::from_utf16_lossy(&buffer[..units]);
+    let id = id.trim_end_matches('\0').trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+#[cfg(not(windows))]
+pub fn machine_id() -> Option<String> {
+    ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .map(|text| text.trim().to_string())
+        .filter(|id| !id.is_empty())
+}
+
 // ------------------------------------------------------------- durable rename
 
 /// Replace `to` with `from`, and do not return until the change is on the disk.

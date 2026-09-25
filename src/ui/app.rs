@@ -216,6 +216,8 @@ pub struct App {
     pub show_recovery_shares: bool,
     /// The recovery panel on the unlock screen.
     pub show_recovery_unlock: bool,
+    /// The backups panel on the unlock screen.
+    pub show_backups_unlock: bool,
     /// Pieces pasted in to rebuild a forgotten master password.
     pub recovery_input: Zeroizing<String>,
 
@@ -283,6 +285,7 @@ impl App {
             show_generator: false,
             show_recovery_shares: false,
             show_recovery_unlock: false,
+            show_backups_unlock: false,
             recovery_input: Zeroizing::new(String::new()),
             breach: crate::breach::Catalogue::load(),
             autotype: None,
@@ -405,11 +408,28 @@ impl App {
 
         match outcome {
             TaskOutcome::Unlocked(open) => {
+                // Read before the vault is handed over. A missing or damaged
+                // record is what a swapped-in older file leaves behind, and a
+                // warning buried in a settings pane is one nobody opens.
+                let state = open.vault.anchor_state();
                 self.session.adopt(*open);
                 self.screen = Screen::Main;
                 self.clear_inputs();
                 self.rollback_prompt = None;
-                self.status = None;
+                self.status = match state {
+                    crate::vault::AnchorState::Removed => Some(Status::warn(
+                        strings.anchor.removed_title,
+                        strings.anchor.removed_body,
+                    )),
+                    crate::vault::AnchorState::Unverifiable => Some(Status::warn(
+                        strings.anchor.unverifiable,
+                        strings.anchor.unverifiable_body,
+                    )),
+                    // A first visit is announced in the settings pane; on the
+                    // way in it would greet every new computer with an alarm.
+                    crate::vault::AnchorState::Verified
+                    | crate::vault::AnchorState::FirstSeenHere => None,
+                };
             }
             TaskOutcome::Created(open) => {
                 // With a container, mirror its sidecar into settings so losing

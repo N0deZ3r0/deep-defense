@@ -56,7 +56,13 @@ pub fn to_csv(data: &VaultData) -> Zeroizing<String> {
 
 /// The vault as JSON: everything, including attachments and history.
 pub fn to_json(data: &VaultData) -> Result<Zeroizing<String>> {
-    serde_json::to_string_pretty(data)
+    // Which computers this vault has been opened on is a fact about this
+    // installation, not about the passwords, and has no business in a file
+    // made to be carried somewhere else.
+    let mut exported = data.clone();
+    exported.machine_key = crate::model::MachineKey::default();
+    exported.anchored_on.clear();
+    serde_json::to_string_pretty(&exported)
         .map(Zeroizing::new)
         .map_err(|e| Error::vault(format!("cannot serialise the vault: {e}")))
 }
