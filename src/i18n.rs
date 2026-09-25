@@ -475,6 +475,8 @@ pub struct Setup {
 
 pub struct Unlock {
     pub subheading: &'static str,
+    /// Without a container there is nothing to dismount.
+    pub subheading_standalone: &'static str,
     pub master_placeholder: &'static str,
     /// "{}" is how many keyfiles.
     pub keyfiles_used: &'static str,
@@ -485,11 +487,13 @@ pub struct Unlock {
     /// "{}" is a path.
     pub vault_label: &'static str,
     pub different_container: &'static str,
+    pub different_vault: &'static str,
     pub different_container_hint: &'static str,
     pub veracrypt_path_label: &'static str,
     pub veracrypt_missing_title: &'static str,
     pub veracrypt_missing_body: &'static str,
     pub pick_container_notice: &'static str,
+    pub pick_vault_notice: &'static str,
 }
 
 pub struct EntryText {
@@ -794,18 +798,21 @@ pub static EN: Strings = Strings {
     },
     unlock: Unlock {
         subheading: "The vault is locked and the container is dismounted.",
+        subheading_standalone: "The vault is locked.",
         master_placeholder: "Master password",
         keyfiles_used: "{} keyfile(s) will also be used.",
         keyfile_missing: "Missing: {}",
         container_label: "Container: {}",
         vault_label: "Vault: {}",
         different_container: "Use a different container…",
+        different_vault: "Use a different vault…",
         different_container_hint: "Go back to the setup screen",
         veracrypt_path_label: "VeraCrypt.exe:",
         veracrypt_missing_title: "VeraCrypt was not found",
         veracrypt_missing_body: "The container cannot be mounted without it. Install \
                                  VeraCrypt, or set the path to it below.",
         pick_container_notice: "Point at an existing container, or create a new one.",
+        pick_vault_notice: "Point at an existing vault file, or create a new one.",
     },
     entry: EntryText {
         new_title: "New entry",
@@ -1046,7 +1053,7 @@ pub static EN: Strings = Strings {
                         revision {}. An older copy may have been put in place of the \
                         current one.",
         copy_backup: "backup {} beside the vault",
-        copy_mirror: "the copy in the mirror, {}",
+        copy_mirror: "the copy in the mirror ({})",
         io: "{}: {}",
     },
 
@@ -1120,8 +1127,9 @@ pub static EN: Strings = Strings {
     anchor: AnchorText {
         section: "Rollback record",
         hint: "A note of the newest version seen, kept outside the vault so an attacker \
-               would have to reach two places at once. It lives on this computer, so a \
-               vault carried to another one arrives with nothing to compare against.",
+               would have to reach two places at once. Every open also compares the file \
+               with its backups and the mirror. The note lives on this computer: if you \
+               move the vault, carry the note across with it.",
         verified: "Checked against this computer's record",
         first_seen: "No record on this computer",
         first_seen_body: "This is the first time this vault has been opened on this \
@@ -1213,9 +1221,9 @@ pub static EN: Strings = Strings {
         entry: "No. {} · {}",
         restore: "Restore",
         confirm_title: "Replace the vault file with this backup?",
-        confirm_body: "Backup {} becomes the vault file. The current file becomes backup \
-                       1, so nothing is lost. The vault locks; unlock it again to use the \
-                       restored version.",
+        confirm_body: "Backup {} becomes the vault file, and the current file becomes \
+                       backup 1, so nothing is lost. An open vault is locked first; unlock \
+                       it to use the restored version.",
         restored_title: "Backup restored",
         restored_body: "Unlock as usual. You will be told that a newer copy exists — it is \
                         the file you just replaced. Choose \"I restored this backup — open \
@@ -1374,18 +1382,21 @@ pub static RU: Strings = Strings {
     },
     unlock: Unlock {
         subheading: "Хранилище заблокировано, контейнер размонтирован.",
+        subheading_standalone: "Хранилище заблокировано.",
         master_placeholder: "Мастер-пароль",
         keyfiles_used: "Также будет использовано файлов-ключей: {}.",
         keyfile_missing: "Отсутствует: {}",
         container_label: "Контейнер: {}",
         vault_label: "Хранилище: {}",
         different_container: "Выбрать другой контейнер…",
+        different_vault: "Выбрать другое хранилище…",
         different_container_hint: "Вернуться к экрану настройки",
         veracrypt_path_label: "VeraCrypt.exe:",
         veracrypt_missing_title: "VeraCrypt не найден",
         veracrypt_missing_body: "Без него контейнер не смонтировать. Установите VeraCrypt или \
                                  укажите путь к нему ниже.",
         pick_container_notice: "Укажите существующий контейнер или создайте новый.",
+        pick_vault_notice: "Укажите существующий файл хранилища или создайте новый.",
     },
     entry: EntryText {
         new_title: "Новая запись",
@@ -1624,7 +1635,7 @@ pub static RU: Strings = Strings {
         rollback_copy: "В файле ревизия {}, но есть более новая копия этого же хранилища — \
                         {}, ревизия {}. Возможно, вместо текущей копии подложили старую.",
         copy_backup: "резервная копия № {} рядом с хранилищем",
-        copy_mirror: "копия в зеркале, {}",
+        copy_mirror: "копия в зеркале ({})",
         io: "{}: {}",
     },
 
@@ -1689,7 +1700,10 @@ pub static RU: Strings = Strings {
     },
     anchor: AnchorText {
         section: "Запись об откате",
-        hint: "Отметка о самой свежей виденной версии, хранится вне хранилища, чтобы подмена требовала доступа сразу к двум местам. Она лежит на этом компьютере, поэтому хранилище, перенесённое на другой, приезжает без неё.",
+        hint: "Отметка о самой свежей виденной версии, хранится вне хранилища, чтобы \
+               подмена требовала доступа сразу к двум местам. Кроме того, при каждом \
+               открытии файл сверяется с резервными копиями и зеркалом. Отметка лежит на \
+               этом компьютере: переносите хранилище — перенесите и её.",
         verified: "Сверено с записью на этом компьютере",
         first_seen: "На этом компьютере записи нет",
         first_seen_body: "Хранилище открыто на этом компьютере впервые, поэтому сравнивать \
@@ -1765,9 +1779,10 @@ pub static RU: Strings = Strings {
         entry: "№ {} · {}",
         restore: "Восстановить",
         confirm_title: "Заменить файл хранилища этой копией?",
-        confirm_body: "Копия № {} станет файлом хранилища. Текущий файл станет \
-                       копией № 1, так что ничего не потеряется. Хранилище \
-                       заблокируется; откройте его снова, чтобы работать с восстановленной версией.",
+        confirm_body: "Копия № {} станет файлом хранилища, а текущий файл — копией № 1, \
+                       так что ничего не потеряется. Открытое хранилище сначала \
+                       заблокируется; откройте его, чтобы работать с восстановленной \
+                       версией.",
         restored_title: "Копия восстановлена",
         restored_body: "Откройте хранилище как обычно. Программа скажет, что есть более \
                         новая копия, — это файл, который вы только что заменили. Выберите \

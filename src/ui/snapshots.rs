@@ -229,6 +229,9 @@ fn the_lock_screen_lists_the_backups_to_restore() {
         assert!(found, "{name}: no backups section on the lock screen");
         // Created, then saved three times: three files before the current one.
         assert_eq!(count(&harness, s.backups.restore), 3, "{name}");
+        // A plain vault file: nothing about a container belongs on this screen.
+        assert!(shown(&harness, s.unlock.different_vault), "{name}");
+        assert!(!shown(&harness, s.unlock.different_container), "{name}");
     }
 }
 
@@ -312,7 +315,7 @@ fn a_newer_copy_in_the_mirror_says_where() {
     );
     keep(&mut harness, "prompt_newer_copy_mirror_en_light");
 
-    assert!(shown(&harness, &mirror.display().to_string()));
+    assert!(shown(&harness, &format!("({})", mirror.display())), "the path set apart");
 }
 
 #[test]

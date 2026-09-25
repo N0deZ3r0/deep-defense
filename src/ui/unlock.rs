@@ -31,7 +31,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.add_space(theme::space::MD);
                     ui.label(theme::heading("Deep Defense", 26.0));
                     ui.add_space(theme::space::XS);
-                    ui.label(theme::muted(palette, strings.unlock.subheading));
+                    let subheading = if app.session.config.use_container {
+                        strings.unlock.subheading
+                    } else {
+                        strings.unlock.subheading_standalone
+                    };
+                    ui.label(theme::muted(palette, subheading));
                 });
                 ui.add_space(theme::space::LG);
 
@@ -153,14 +158,22 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
 
                 ui.add_space(theme::space::LG);
+                // Named for what is actually in use: the default is a plain
+                // vault file, and offering "a different container" to someone
+                // who never had one only makes them wonder what they missed.
+                let (different, notice) = if app.session.config.use_container {
+                    (strings.unlock.different_container, strings.unlock.pick_container_notice)
+                } else {
+                    (strings.unlock.different_vault, strings.unlock.pick_vault_notice)
+                };
                 if ui
-                    .small_button(strings.unlock.different_container)
+                    .small_button(different)
                     .on_hover_text(strings.unlock.different_container_hint)
                     .clicked()
                 {
                     app.screen = Screen::Setup;
                     app.setup = super::setup::SetupState::new(&app.session.config);
-                    app.status = Some(Status::info(strings.unlock.pick_container_notice));
+                    app.status = Some(Status::info(notice));
                 }
                 ui.add_space(theme::space::PAGE);
             });
