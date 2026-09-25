@@ -7,7 +7,7 @@
 [![CI](https://github.com/N0deZ3r0/deep-defense/actions/workflows/ci.yml/badge.svg)](https://github.com/N0deZ3r0/deep-defense/actions/workflows/ci.yml)
 ![version](https://img.shields.io/badge/version-1.1.0-3b5bdb)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-4c6ef5)
-![tests](https://img.shields.io/badge/tests-374-2f9e44)
+![tests](https://img.shields.io/badge/tests-377-2f9e44)
 ![Rust](https://img.shields.io/badge/Rust-1.98-dea584)
 ![install](https://img.shields.io/badge/install-none-2f9e44)
 
@@ -143,7 +143,7 @@ auto-lock on idle and on screen lock, and a clipboard that clears itself.
 ## How it is verified
 
 ```bash
-cargo test            # 365 tests, about four minutes
+cargo test            # 368 tests, about four minutes
 cargo build --release # or build.ps1, which also records the fingerprint
 ```
 
@@ -160,7 +160,7 @@ what it may not do is bring the process down on a length the file supplied. Arou
 two-of-two split of one byte, one piece plus every possible partner yields every
 possible secret exactly once.
 
-Nine tests beyond those 365, in `ui/snapshots.rs`, draw the real screens — the lock
+Nine tests beyond those 368, in `ui/snapshots.rs`, draw the real screens — the lock
 screen and its backups, the older-file prompt in each of its three forms, settings
 sections — with egui's own test harness, through wgpu on WARP, the software Direct3D 12
 adapter every Windows runner has. CI keeps the pictures for a person to look at, and
