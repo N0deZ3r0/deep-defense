@@ -278,6 +278,17 @@ fn entry_row(
         egui::vec2(ui.available_width(), height),
         egui::Sense::click(),
     );
+    // Drawn by hand, so it has to be named by hand. Without this a screen
+    // reader met every entry in the list as a button called nothing — found
+    // only when the screen tests went looking for an entry by its name.
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            true,
+            selected,
+            spoken_name(strings, row),
+        )
+    });
 
     if selected {
         ui.painter().rect_filled(
@@ -365,6 +376,27 @@ fn entry_row(
     }
 
     response
+}
+
+/// What a screen reader says for a row: the name, then the badges as the
+/// words they show, then the username.
+fn spoken_name(strings: &Strings, row: &Row) -> String {
+    let mut spoken = row.name.clone();
+    for (shown, word) in [
+        (row.weak, strings.entry.marker_weak),
+        (row.stale, strings.entry.marker_old),
+        (row.has_totp, strings.entry.marker_totp),
+    ] {
+        if shown {
+            spoken.push_str(", ");
+            spoken.push_str(word);
+        }
+    }
+    if !row.username.is_empty() {
+        spoken.push_str(", ");
+        spoken.push_str(&row.username);
+    }
+    spoken
 }
 
 fn select_entry(app: &mut App, key: &str) {
@@ -1425,6 +1457,68 @@ mod tests {
         assert_eq!(mask("ab"), "ab");
         assert_eq!(mask("a"), "a");
         assert_eq!(mask(""), "");
+    }
+
+    fn row(name: &str, username: &str, weak: bool, stale: bool, has_totp: bool) -> Row {
+        Row {
+            key: name.to_lowercase(),
+            name: name.into(),
+            username: username.into(),
+            weak,
+            stale,
+            has_totp,
+        }
+    }
+
+    #[test]
+    fn a_row_is_spoken_with_its_badges_as_words() {
+        use crate::i18n::{EN, RU};
+        for strings in [&EN, &RU] {
+            let spoken = spoken_name(strings, &row("GitHub", "octo@example.com", true, false, true));
+            assert!(spoken.starts_with("GitHub"), "{spoken}");
+            assert!(spoken.contains(strings.entry.marker_weak), "{spoken}");
+            assert!(spoken.contains(strings.entry.marker_totp), "{spoken}");
+            assert!(!spoken.contains(strings.entry.marker_old), "{spoken}");
+            assert!(spoken.ends_with("octo@example.com"), "{spoken}");
+        }
+        assert_eq!(spoken_name(&EN, &row("Router", "", false, false, false)), "Router");
+    }
+
+    #[test]
+    fn every_entry_in_the_list_is_named_for_a_screen_reader() {
+        // The rows are painted by hand, which is how they came to be the one
+        // clickable thing in the program announced as nothing.
+        use crate::i18n::EN;
+        let rows = [
+            row("GitHub", "octo@example.com", false, true, false),
+            row("Router", "", true, false, false),
+        ];
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, theme::Appearance::Dark);
+        ctx.enable_accesskit();
+        let mut draw = |ui: &mut egui::Ui| {
+            for (index, row) in rows.iter().enumerate() {
+                entry_row(ui, &theme::DARK, &EN, row, index == 0);
+            }
+        };
+        // Two passes: the first lays out, the second reports on it.
+        let mut output = ctx.run_ui(Default::default(), &mut draw);
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(Default::default(), &mut draw);
+        output.textures_delta.clear();
+
+        let nodes = output
+            .platform_output
+            .accesskit_update
+            .expect("accesskit was enabled, so a tree must come back")
+            .nodes;
+        for row in &rows {
+            let named = nodes.iter().any(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button
+                    && node.label().is_some_and(|label| label.starts_with(row.name.as_str()))
+            });
+            assert!(named, "{} is not announced by name", row.name);
+        }
     }
 
     #[test]
