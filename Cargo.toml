@@ -39,6 +39,14 @@ egui_kittest = { version = "0.36.2", optional = true, default-features = false, 
 [features]
 ui-snapshots = ["dep:egui_kittest"]
 
+# The tests run the real key derivation and the real ciphers on every open,
+# and since each open also reads its backups, most of a debug test run was
+# spent in unoptimised Argon2 and AES. Dependencies are built optimised even
+# in a debug build. This crate is not: the arithmetic overflow checks the tests
+# are run in debug for stay on in the code they are there to check.
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = "fat"
