@@ -182,16 +182,30 @@ fn shown(harness: &Harness<'static, Shot>, text: &str) -> bool {
     harness.query_all_by_label_contains(text).next().is_some()
 }
 
-/// Bring the first thing whose text contains `label` into view, in whichever
-/// scroll area holds it.
-fn scroll_to(harness: &mut Harness<'static, Shot>, label: &str) {
-    harness
-        .query_all_by_label_contains(label)
-        .next()
-        .unwrap_or_else(|| panic!("nothing on screen is labelled {label:?}"))
-        .scroll_to_me();
-    harness.run_ok();
+/// A section's caption as it is drawn: `theme::label_caps` puts it in capitals,
+/// and the accessibility tree carries the text as drawn.
+fn caption(text: &str) -> String {
+    text.to_uppercase()
 }
+
+/// Bring the first thing whose text contains `label` into view, in whichever
+/// scroll area holds it. Says whether there was anything to bring.
+///
+/// Does not fail by itself: the picture is taken either way, and the test's
+/// own assertions say what was missing.
+fn scroll_to(harness: &mut Harness<'static, Shot>, label: &str) -> bool {
+    {
+        let Some(node) = harness.query_all_by_label_contains(label).next() else {
+            return false;
+        };
+        node.scroll_to_me();
+    }
+    harness.run_ok();
+    true
+}
+
+// Each test below takes its picture before it asserts anything, so that a
+// failing test still leaves the picture that shows why.
 
 // ----------------------------------------------------------- the lock screen
 
@@ -208,12 +222,13 @@ fn the_lock_screen_lists_the_backups_to_restore() {
         harness.run_ok();
 
         let s = strings(&harness);
-        assert!(shown(&harness, s.backups.section));
-        // Created, then saved three times: three files before the current one.
-        assert_eq!(count(&harness, s.backups.restore), 3);
         // The lock screen scrolls; the list sits below the password field.
-        scroll_to(&mut harness, s.backups.section);
+        let found = scroll_to(&mut harness, &caption(s.backups.section));
         keep(&mut harness, name);
+
+        assert!(found, "{name}: no backups section on the lock screen");
+        // Created, then saved three times: three files before the current one.
+        assert_eq!(count(&harness, s.backups.restore), 3, "{name}");
     }
 }
 
@@ -227,13 +242,15 @@ fn restoring_from_the_lock_screen_asks_first() {
 
     let s = strings(&harness);
     let before = std::fs::read(home.join("vault.ddv")).unwrap();
-    scroll_to(&mut harness, s.backups.section);
+    scroll_to(&mut harness, &caption(s.backups.section));
     harness
         .query_all_by_label(s.backups.restore)
         .next()
         .expect("a restore button per backup")
         .click();
     harness.run_ok();
+    scroll_to(&mut harness, s.backups.confirm_title);
+    keep(&mut harness, "unlock_backups_confirm_en_light");
 
     assert!(shown(&harness, s.backups.confirm_title), "asks before replacing");
     assert_eq!(
@@ -241,13 +258,15 @@ fn restoring_from_the_lock_screen_asks_first() {
         before,
         "the first click changes nothing on disk"
     );
-    scroll_to(&mut harness, s.backups.confirm_title);
-    keep(&mut harness, "unlock_backups_confirm_en_light");
 }
 
 // ------------------------------------------------ an older file, three ways
 
-fn prompt(evidence: Evidence, lang: Lang, appearance: Appearance) -> (TestHome, Harness<'static, Shot>) {
+fn prompt(
+    evidence: Evidence,
+    lang: Lang,
+    appearance: Appearance,
+) -> (TestHome, Harness<'static, Shot>) {
     let home = TestHome::new("prompt");
     let mut app = app_with_vault(&home, lang, appearance, 2);
     app.rollback_prompt = Some((2, evidence));
@@ -270,12 +289,13 @@ fn a_newer_copy_is_offered_back() {
             lang,
             appearance,
         );
-        let s = strings(&harness);
-        assert!(shown(&harness, s.shell.newer_title));
-        assert_eq!(count(&harness, s.shell.restore_newer), 1);
-        assert_eq!(count(&harness, s.shell.rollback_accept), 1);
-        assert_eq!(count(&harness, s.common.cancel), 1);
         keep(&mut harness, name);
+
+        let s = strings(&harness);
+        assert!(shown(&harness, s.shell.newer_title), "{name}");
+        assert_eq!(count(&harness, s.shell.restore_newer), 1, "{name}");
+        assert_eq!(count(&harness, s.shell.rollback_accept), 1, "{name}");
+        assert_eq!(count(&harness, s.common.cancel), 1, "{name}");
     }
 }
 
@@ -290,19 +310,21 @@ fn a_newer_copy_in_the_mirror_says_where() {
         Lang::En,
         Appearance::Light,
     );
-    assert!(shown(&harness, &mirror.display().to_string()));
     keep(&mut harness, "prompt_newer_copy_mirror_en_light");
+
+    assert!(shown(&harness, &mirror.display().to_string()));
 }
 
 #[test]
 fn a_copy_from_before_a_key_change_is_not_offered_as_current() {
     {
         let (_home, mut harness) = prompt(Evidence::Superseded, Lang::En, Appearance::Light);
+        keep(&mut harness, "prompt_superseded_en_light");
+
         let s = strings(&harness);
         assert!(shown(&harness, s.shell.superseded_title));
         assert_eq!(count(&harness, s.shell.restore_newer), 0, "nothing newer to offer");
         assert_eq!(count(&harness, s.shell.rollback_accept), 1);
-        keep(&mut harness, "prompt_superseded_en_light");
     }
     // One scratch home at a time: they share a lock.
     let (_home, mut harness) = prompt(Evidence::Superseded, Lang::Ru, Appearance::Dark);
@@ -313,10 +335,11 @@ fn a_copy_from_before_a_key_change_is_not_offered_as_current() {
 fn a_record_that_is_ahead_is_shown_with_both_numbers() {
     let (_home, mut harness) =
         prompt(Evidence::Record { revision: 7 }, Lang::En, Appearance::Light);
+    keep(&mut harness, "prompt_record_en_light");
+
     let s = strings(&harness);
     assert!(shown(&harness, s.shell.rollback_title));
     assert_eq!(count(&harness, s.shell.restore_newer), 0);
-    keep(&mut harness, "prompt_record_en_light");
 }
 
 // ------------------------------------------------------------- once inside
@@ -333,11 +356,13 @@ fn a_first_visit_is_said_on_the_way_in() {
         app.status = unlock_notice(app.strings(), AnchorState::FirstSeenHere);
         let mut harness = harness(app);
         harness.run_ok();
+        keep(&mut harness, name);
 
         let s = strings(&harness);
-        assert!(shown(&harness, s.anchor.first_seen));
-        assert!(shown(&harness, "GitHub"), "the entries are there behind it");
-        keep(&mut harness, name);
+        assert!(shown(&harness, s.anchor.first_seen), "{name}");
+        // Found by the name a screen reader is given, which is the point:
+        // the rows are painted by hand and used to be given none.
+        assert!(shown(&harness, "GitHub"), "{name}: the entries are there behind it");
     }
 }
 
@@ -355,9 +380,11 @@ fn the_backups_section_in_settings() {
         harness.run_ok();
 
         let s = strings(&harness);
-        scroll_to(&mut harness, s.backups.section);
-        assert_eq!(count(&harness, s.backups.restore), 3);
+        let found = scroll_to(&mut harness, &caption(s.backups.section));
         keep(&mut harness, name);
+
+        assert!(found, "{name}: no backups section in the settings");
+        assert_eq!(count(&harness, s.backups.restore), 3, "{name}");
     }
 }
 
@@ -371,7 +398,9 @@ fn the_rollback_record_section_in_settings() {
     harness.run_ok();
 
     let s = strings(&harness);
-    scroll_to(&mut harness, s.anchor.section);
-    assert!(shown(&harness, s.anchor.verified), "opened here, checked here");
+    let found = scroll_to(&mut harness, &caption(s.anchor.section));
     keep(&mut harness, "settings_record_en_light");
+
+    assert!(found, "no rollback record section in the settings");
+    assert!(shown(&harness, s.anchor.verified), "opened here, checked here");
 }
