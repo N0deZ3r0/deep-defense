@@ -58,8 +58,8 @@ const GCM_TAG_LEN: usize = 16;
 const GCM_NONCE: [u8; 12] = [0u8; 12];
 const XCHACHA_NONCE: [u8; 24] = [0u8; 24];
 /// Distinct labels are what make the two cipher keys independent.
-const HKDF_INFO_OUTER: &[u8] = b"deep-defense/vault-data-key/v1";
-const HKDF_INFO_INNER: &[u8] = b"deep-defense/vault-inner-key/xchacha20poly1305/v1";
+pub(crate) const HKDF_INFO_OUTER: &[u8] = b"deep-defense/vault-data-key/v1";
+pub(crate) const HKDF_INFO_INNER: &[u8] = b"deep-defense/vault-inner-key/xchacha20poly1305/v1";
 
 /// Cipher suite names as they appear in the vault header.
 const CIPHER_CASCADE: &str = "AES-256-GCM+XChaCha20-Poly1305";
@@ -383,7 +383,7 @@ pub fn combine_secret(password: &Secret, keyfiles: &[std::path::PathBuf]) -> Res
     Ok(Secret::new(mac.finalize().into_bytes().to_vec()))
 }
 
-fn subkey(master_key: &Key, seed: &[u8], info: &[u8]) -> Result<Key> {
+pub(crate) fn subkey(master_key: &Key, seed: &[u8], info: &[u8]) -> Result<Key> {
     let hkdf = Hkdf::<sha2::Sha256>::new(Some(seed), master_key.as_bytes());
     let mut derived = Key::zeroed();
     hkdf.expand(info, derived.as_mut())

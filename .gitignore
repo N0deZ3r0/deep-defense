@@ -12,3 +12,11 @@ config.json
 # would state a fact that is false for every clone. It belongs beside a
 # released binary, not in the source.
 SHA256SUMS.txt
+
+# The one vault file that belongs in the repository: written by the reference
+# implementation with a published throwaway password, so the Rust code can be
+# checked against a file it did not write.
+!tests/vectors/*.ddv
+
+# Left behind by running the reference implementation.
+__pycache__/

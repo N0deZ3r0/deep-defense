@@ -29,5 +29,7 @@ pub mod slots;
 pub mod totp;
 pub mod vault;
 pub mod veracrypt;
+#[cfg(test)]
+mod vectors;
 
 pub mod ui;
