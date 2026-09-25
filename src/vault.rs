@@ -871,7 +871,11 @@ impl Vault {
             .collect();
         if let (Some(directory), Some(name)) = (mirror, self.path.file_name()) {
             let target = directory.join(name);
-            if target != self.path {
+            // Asked once, before any file in it: a mirror on a network share
+            // that is not connected can take the system's whole timeout to
+            // answer, and six files would pay that six times over, on the way
+            // into the vault.
+            if target != self.path && directory.is_dir() {
                 copies.push((target.clone(), CopyAt::Mirror(target.clone())));
                 for index in 1..=BACKUP_COUNT {
                     let backup = backup_path_for(&target, index);
@@ -3184,6 +3188,20 @@ mod tests {
         let opened =
             Vault::open_with_mirror(&dir.vault(), &secret, false, Some(&mirror)).unwrap();
         assert_eq!(opened.anchor_state(), AnchorState::Verified);
+    }
+
+    #[test]
+    fn a_mirror_that_is_not_there_does_not_stand_in_the_way() {
+        // An unplugged drive or a disconnected share: the mirror is a witness
+        // when it is there and nothing at all when it is not.
+        let dir = TempDir::new("copies-mirror-gone");
+        let secret = Secret::from_str("compare me");
+        drop(small_vault(&dir.vault(), &secret));
+        let gone = dir.path.join("unplugged").join("drive");
+
+        let opened = Vault::open_with_mirror(&dir.vault(), &secret, false, Some(&gone)).unwrap();
+        assert_eq!(opened.anchor_state(), AnchorState::Verified);
+        assert!(!gone.exists(), "looking for it does not create it");
     }
 
     #[test]
