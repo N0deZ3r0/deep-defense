@@ -60,15 +60,40 @@ jobs:
         shell: pwsh
         run: Get-Content SHA256SUMS.txt
 
-      - name: Attach to the release
+      - name: Publish the release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = if ('${{ inputs.tag }}') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
-          # --clobber so re-running this on a tag replaces the assets rather
-          # than failing half way and leaving a release with one of the two.
-          gh release upload $tag `
-            target/x86_64-pc-windows-gnu/release/deep-defense.exe `
-            SHA256SUMS.txt `
-            --clobber --repo ${{ github.repository }}
+          $exe = 'target/x86_64-pc-windows-gnu/release/deep-defense.exe'
+          $hash = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
+          $commit = (git rev-parse --short HEAD).Trim()
+
+          # The notes are written in the repository, beside the code they
+          # describe, and only the two facts that exist after the build — the
+          # fingerprint and the commit — are filled in here. A fingerprint
+          # typed in by hand would be the one line of the notes nobody checks.
+          $source = "docs/releases/$tag.md"
+          if (Test-Path $source) {
+            $notes = (Get-Content $source -Raw -Encoding utf8).Replace('{{SHA256}}', $hash).Replace('{{COMMIT}}', $commit)
+          } else {
+            $notes = "Built from $commit.`n`nSHA-256 of deep-defense.exe: ``$hash``"
+          }
+          Set-Content release-notes.md $notes -Encoding utf8
+
+          gh release view $tag --repo ${{ github.repository }} *> $null
+          if ($LASTEXITCODE -eq 0) {
+            # Already there, made by hand or by an earlier run of this job.
+            # --clobber so a re-run replaces the assets rather than failing
+            # half way and leaving a release with one of the two.
+            gh release upload $tag $exe SHA256SUMS.txt --clobber --repo ${{ github.repository }}
+            gh release edit $tag --notes-file release-notes.md --repo ${{ github.repository }}
+          } else {
+            $version = $tag.TrimStart('v')
+            gh release create $tag $exe SHA256SUMS.txt `
+              --title "Deep Defense $version" `
+              --notes-file release-notes.md `
+              --verify-tag `
+              --repo ${{ github.repository }}
+          }
