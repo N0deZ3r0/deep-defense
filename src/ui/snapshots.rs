@@ -130,8 +130,14 @@ fn harness(app: App) -> Harness<'static, Shot> {
         .build_ui_state(
             |ui, shot: &mut Shot| {
                 if !shot.themed {
+                    // Fonts set now are bound from the next pass on. The
+                    // program sets them before its first frame; here the
+                    // first frame does only that, because a screen naming a
+                    // font family before it is bound panics.
                     theme::apply(ui.ctx(), shot.appearance);
                     shot.themed = true;
+                    ui.ctx().request_repaint();
+                    return;
                 }
                 shot.app.draw(ui);
             },
@@ -176,11 +182,11 @@ fn shown(harness: &Harness<'static, Shot>, text: &str) -> bool {
     harness.query_all_by_label_contains(text).next().is_some()
 }
 
-/// Bring the first thing labelled `label` into view, in whichever scroll
-/// area holds it.
+/// Bring the first thing whose text contains `label` into view, in whichever
+/// scroll area holds it.
 fn scroll_to(harness: &mut Harness<'static, Shot>, label: &str) {
     harness
-        .query_all_by_label(label)
+        .query_all_by_label_contains(label)
         .next()
         .unwrap_or_else(|| panic!("nothing on screen is labelled {label:?}"))
         .scroll_to_me();
@@ -205,6 +211,8 @@ fn the_lock_screen_lists_the_backups_to_restore() {
         assert!(shown(&harness, s.backups.section));
         // Created, then saved three times: three files before the current one.
         assert_eq!(count(&harness, s.backups.restore), 3);
+        // The lock screen scrolls; the list sits below the password field.
+        scroll_to(&mut harness, s.backups.section);
         keep(&mut harness, name);
     }
 }
@@ -219,6 +227,7 @@ fn restoring_from_the_lock_screen_asks_first() {
 
     let s = strings(&harness);
     let before = std::fs::read(home.join("vault.ddv")).unwrap();
+    scroll_to(&mut harness, s.backups.section);
     harness
         .query_all_by_label(s.backups.restore)
         .next()
@@ -232,6 +241,7 @@ fn restoring_from_the_lock_screen_asks_first() {
         before,
         "the first click changes nothing on disk"
     );
+    scroll_to(&mut harness, s.backups.confirm_title);
     keep(&mut harness, "unlock_backups_confirm_en_light");
 }
 
