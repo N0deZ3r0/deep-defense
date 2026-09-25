@@ -7,7 +7,7 @@
 [![CI](https://github.com/N0deZ3r0/deep-defense/actions/workflows/ci.yml/badge.svg)](https://github.com/N0deZ3r0/deep-defense/actions/workflows/ci.yml)
 ![version](https://img.shields.io/badge/version-1.0.0-3b5bdb)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-4c6ef5)
-![tests](https://img.shields.io/badge/tests-338-2f9e44)
+![tests](https://img.shields.io/badge/tests-339-2f9e44)
 ![Rust](https://img.shields.io/badge/Rust-1.98-dea584)
 ![install](https://img.shields.io/badge/install-none-2f9e44)
 
@@ -139,7 +139,7 @@ auto-lock on idle and on screen lock, and a clipboard that clears itself.
 ## How it is verified
 
 ```bash
-cargo test            # 338 tests, about four minutes
+cargo test            # 339 tests, about four minutes
 cargo build --release # or build.ps1, which also records the fingerprint
 ```
 

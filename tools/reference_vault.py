@@ -23,7 +23,7 @@ Usage
     python tools/reference_vault.py self-test
     python tools/reference_vault.py kat                  # values pinned in src/vectors.rs
     python tools/reference_vault.py write-vector FILE    # the file in tests/vectors/
-    python tools/reference_vault.py open FILE            # asks for the password
+    python tools/reference_vault.py open FILE [KEYFILE...]  # asks for the password
 
 `open` prints which slot a password opens and a digest of what is inside, not
 the contents: pointed at a real vault, printing the payload would print every
@@ -366,10 +366,10 @@ def main(argv) -> int:
         with open(argv[2], "wb") as out:
             out.write(data)
         print(f"wrote {argv[2]}: {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()}")
-    elif command == "open" and len(argv) == 3:
+    elif command == "open" and len(argv) >= 3:
         data = open(argv[2], "rb").read()
         header, header_json, slots = parse_file(data)
-        secret = combine_secret(getpass.getpass("Password: ").encode())
+        secret = combine_secret(getpass.getpass("Password: ").encode(), argv[3:])
         for index, slot in enumerate(slots):
             try:
                 payload = open_slot(header, header_json, slot, index, secret)

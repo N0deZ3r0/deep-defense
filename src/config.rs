@@ -59,8 +59,12 @@ pub(crate) mod test_home {
             // A panicking test poisons the lock. What it guards is one
             // environment variable, so taking it anyway is right.
             let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            // A previous test may have pretended to be another computer.
-            std::env::remove_var("DEEP_DEFENSE_TEST_MACHINE");
+            // Every test starts on the same named computer rather than on
+            // whatever the machine running the suite reports: a test about
+            // which computer a vault has been on must not depend on the
+            // registry of a CI runner. Tests that move to another computer
+            // override this; `platform` tests the real identity separately.
+            std::env::set_var("DEEP_DEFENSE_TEST_MACHINE", "the test computer");
             let path = std::env::temp_dir()
                 .join(format!("dd-test-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);

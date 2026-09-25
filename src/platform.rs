@@ -307,6 +307,23 @@ mod tests {
     }
 
     #[test]
+    fn this_computer_has_an_identity_and_it_does_not_change() {
+        // The rollback record depends on it: a missing record is only
+        // reported as removed if the vault can tell this computer from
+        // another. If the identity cannot be read, that detection is off and
+        // this test is where it shows.
+        let first = machine_id();
+        let second = machine_id();
+        assert_eq!(first, second, "the identity must be stable across reads");
+        #[cfg(windows)]
+        {
+            let id = first.expect("Windows always has a MachineGuid");
+            assert!(id.len() >= 32, "a GUID, not a fragment of one: {id}");
+            assert!(!id.contains(' '));
+        }
+    }
+
+    #[test]
     fn one_reading_is_not_enough() {
         let mut fake = Fake {
             readings: vec![true, false, true, false],
