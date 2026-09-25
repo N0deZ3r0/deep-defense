@@ -127,9 +127,35 @@ jobs:
         # no graphics card is involved. Each test also asserts on what is on
         # screen through the accessibility tree, so this fails on its own; the
         # pictures are for a person to look at.
+        shell: bash
         env:
           DEEP_DEFENSE_SNAPSHOTS: ${{ github.workspace }}\ui-snapshots
-        run: cargo test --lib --features ui-snapshots ui::snapshots -- --test-threads=1
+        run: |
+          set +e
+          cargo test --lib --features ui-snapshots ui::snapshots -- --test-threads=1 2>&1 | tee draw.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            # A job log is only shown to someone signed in to GitHub; the
+            # annotations and the summary are shown to anyone. Copy the reason
+            # there, so a red job explains itself to whoever is looking.
+            grep -E -A6 'panicked at|^error(\[|:)|^failures:$' draw.log | head -80 > why.txt
+            {
+              echo '### Why drawing failed'
+              echo
+              echo '```'
+              cat why.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            grep -E -A3 'panicked at' draw.log | head -40 | awk '
+              /panicked at/ { if (msg != "") print msg; msg = $0; next }
+              /^--$/ { next }
+              { msg = msg "%0A" $0 }
+              END { if (msg != "") print msg }
+            ' | head -8 | while IFS= read -r line; do
+              echo "::error title=A screen test failed::$line"
+            done
+          fi
+          exit "$code"
 
       - uses: actions/upload-artifact@v4
         # Kept when a test fails too: the picture is often the quickest way to
