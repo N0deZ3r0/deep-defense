@@ -94,3 +94,49 @@ jobs:
           # short enough not to leave unsigned binaries lying around for months.
           retention-days: 14
           if-no-files-found: error
+
+  screens:
+    name: Draw the screens
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Find the GNU toolchain
+        shell: pwsh
+        run: |
+          # The same lookup as the job above: build.rs embeds the icon with
+          # windres and ar, and the tests link the library that carries it.
+          $mingw = & .\tools\find-mingw.ps1 2>$null
+          if (-not $mingw) {
+            Write-Host 'Not on the image; installing MinGW.'
+            choco install mingw -y --no-progress | Out-Null
+            $mingw = & .\tools\find-mingw.ps1
+          }
+          Write-Host "Using $mingw"
+          $mingw | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Lint the drawing code
+        # It only compiles with the feature on, so the job above never sees it.
+        run: cargo clippy --lib --all-targets --features ui-snapshots -- -D warnings
+
+      - name: Draw
+        # The real screens, drawn by egui's own test harness through wgpu on
+        # WARP — the software Direct3D 12 adapter every Windows runner has — so
+        # no graphics card is involved. Each test also asserts on what is on
+        # screen through the accessibility tree, so this fails on its own; the
+        # pictures are for a person to look at.
+        env:
+          DEEP_DEFENSE_SNAPSHOTS: ${{ github.workspace }}\ui-snapshots
+        run: cargo test --lib --features ui-snapshots ui::snapshots -- --test-threads=1
+
+      - uses: actions/upload-artifact@v4
+        # Kept when a test fails too: the picture is often the quickest way to
+        # see why.
+        if: always()
+        with:
+          name: screens-${{ github.sha }}
+          path: ui-snapshots/*.png
+          retention-days: 14
+          if-no-files-found: warn

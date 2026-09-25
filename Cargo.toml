@@ -31,6 +31,14 @@ subtle = "2.6.1"
 windows-sys = { version = "0.61.2", features = ["Win32_System_Diagnostics_Debug", "Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Globalization", "Win32_System_Memory", "Win32_System_StationsAndDesktops", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 zeroize = "1.9.0"
 
+# Only for pictures of the screens, drawn in CI (`--features ui-snapshots`).
+# Never part of the program: it brings a whole GPU renderer, which the tests
+# run on a software adapter so they need no graphics card.
+egui_kittest = { version = "0.36.2", optional = true, default-features = false, features = ["wgpu", "snapshot"] }
+
+[features]
+ui-snapshots = ["dep:egui_kittest"]
+
 [profile.release]
 opt-level = 3
 lto = "fat"
