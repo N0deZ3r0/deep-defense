@@ -791,9 +791,16 @@ mod tests {
             status_chip(ui, Icon::Keyboard, "Typing in 4 s", theme::DARK.warning);
             status_chip(ui, Icon::Check, "Checked against this computer's record", theme::DARK.success);
         });
+        // egui puts a label's text in `value`, the AccessKit convention for
+        // static text; a control's name goes in `label`. A reader uses either.
         for text in ["Typing in 4 s", "Checked against this computer's record"] {
             assert!(
-                nodes.iter().any(|node| node.label().is_some_and(|label| label == text)),
+                nodes.iter().any(|node| {
+                    [node.label(), node.value()]
+                        .into_iter()
+                        .flatten()
+                        .any(|said| said == text)
+                }),
                 "{text:?} is drawn but never said"
             );
         }
