@@ -411,10 +411,14 @@ pub fn status_chip(ui: &mut Ui, icon: Icon, text: &str, color: Color32) {
         egui::FontId::proportional(12.0),
         color,
     );
-    let (rect, _) = ui.allocate_exact_size(
+    let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ICON + GAP + galley.size().x, 20.0),
         Sense::hover(),
     );
+    // Painted, so it has to be named by hand like everything else painted:
+    // these are the countdowns to the lock and to auto-type, and whether the
+    // rollback record checked out — exactly what someone listening needs.
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
     let icon_rect = Rect::from_min_size(
         egui::pos2(rect.min.x, rect.center().y - ICON / 2.0),
         Vec2::splat(ICON),
@@ -777,6 +781,22 @@ mod tests {
             nodes.iter().filter(|n| is_interactive(n.role())).count() >= 7,
             "the tree looks too small to have covered the gallery"
         );
+    }
+
+    #[test]
+    fn a_status_chip_is_read_out_as_well_as_shown() {
+        // Not a control, so the test above does not look at it — which is how
+        // the auto-type countdown came to be silent for anyone not looking.
+        let nodes = accessibility_nodes(theme::Appearance::Dark, |ui| {
+            status_chip(ui, Icon::Keyboard, "Typing in 4 s", theme::DARK.warning);
+            status_chip(ui, Icon::Check, "Checked against this computer's record", theme::DARK.success);
+        });
+        for text in ["Typing in 4 s", "Checked against this computer's record"] {
+            assert!(
+                nodes.iter().any(|node| node.label().is_some_and(|label| label == text)),
+                "{text:?} is drawn but never said"
+            );
+        }
     }
 
     #[test]
