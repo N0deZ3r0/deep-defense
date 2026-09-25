@@ -34,7 +34,7 @@ If it is a vulnerability rather than a bug, do not open an issue at all: see
 ## Running it
 
 ```bash
-cargo test            # 339 tests, about four minutes
+cargo test            # 365 tests, about four minutes
 cargo build --release
 ```
 
@@ -49,6 +49,17 @@ problem. `build.ps1` handles it for you.
 The slowest tests are the vault ones, because each creates a real vault and each unlock is
 a real Argon2id pass at the floor cost. That is the point of them; they are slow for the
 same reason the program is safe.
+
+A change to a screen can be looked at without starting the program:
+
+```bash
+cargo test --lib --features ui-snapshots ui::snapshots -- --test-threads=1
+```
+
+draws the real screens into `target/ui-snapshots/` through a software renderer, and fails
+if what the accessibility tree shows is not what the test expects. CI does the same on
+every push and keeps the pictures as an artifact of the run. A new screen, or a new state
+of one, should get a test there.
 
 ## Pull requests
 
@@ -104,7 +115,7 @@ Argon2id, AES-256-GCM, XChaCha20-Poly1305, HKDF, схема Шамира над 
 ## Как запустить
 
 ```bash
-cargo test            # 339 тестов, около четырёх минут
+cargo test            # 365 тестов, около четырёх минут
 cargo build --release
 ```
 
@@ -119,6 +130,17 @@ cargo build --release
 Самые медленные тесты — про хранилище: каждый создаёт настоящее хранилище, и каждое
 открытие — настоящий проход Argon2id по нижней границе стоимости. В этом и смысл: они
 медленные ровно по той причине, по которой программа безопасна.
+
+Изменение экрана можно посмотреть, не запуская программу:
+
+```bash
+cargo test --lib --features ui-snapshots ui::snapshots -- --test-threads=1
+```
+
+рисует настоящие экраны в `target/ui-snapshots/` программным рендерером и падает, если
+дерево доступности показывает не то, что ожидает тест. CI делает то же на каждый push и
+сохраняет картинки артефактом прогона. Новый экран или новое его состояние — повод
+добавить туда тест.
 
 ## Пул-реквесты
 

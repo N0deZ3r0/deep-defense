@@ -208,6 +208,22 @@ sealed = base64(nonce ‖ XChaCha20-Poly1305(key = k, nonce, aad = id as ASCII, 
 `revision` counts saves. A vault whose revision is lower than its sealed record
 is reported as rolled back.
 
+**A key that goes out of use is retired.** Changing the master password gives the
+slot a new salt, and so does a rebuild with a new work factor — for every slot the
+rebuild carries. The entry under the *old* `id` is then rewritten with
+
+```
+revision = 2^64 − 1        sealed under the old master_key, as above
+```
+
+Any file the old key still opens is therefore behind its record, and is reported
+as a copy from before the key change rather than as current. Without this, the
+entry for the old key would stay at the last revision written under it, and the
+file from just before the change would pass. The marker is 48 bytes before
+encoding like every other entry, so the store does not show how many times a key
+was changed. Retired entries sit just ahead of the file's current ones, and age
+out of the 64 like any other.
+
 Whenever a vault writes its record it also makes sure every *other* slot of the
 same file has an entry, adding 48 random bytes under that slot's `id` if there is
 none. The `id` of a slot is computable from the file alone — its first 32 bytes
@@ -216,7 +232,10 @@ whether or not a hidden vault exists, and a hidden vault opened on this computer
 later finds a placeholder waiting under its own `id`. Revisions are sealed rather
 than written out because a plain number would show which entries are real.
 
-A record written by another vault is never modified.
+An entry is only ever written under a key the writer holds: its own, or — in a
+rebuild that carries the other slot, which needs that slot's password — the
+carried slot's old key (to retire it) and new key (to record it again under its
+new `id`, so its next open here does not find the entry missing).
 
 ### 3.2 Which computers a vault has been on
 
@@ -234,8 +253,9 @@ listed means this is the first visit. The identity itself is never stored, only
 a tag keyed with a secret inside the vault. Both fields are left out of JSON
 exports.
 
-The residual gap: an older copy of the file from before this computer was first
-listed looks like a first visit, and is reported as one.
+An older copy of the file from before this computer was first listed carries an
+`anchored_on` without it, and would look like a first visit — which is where the
+other copies of the file come in (§3.4).
 
 ### 3.3 The carried record and the earlier store
 
@@ -252,6 +272,43 @@ mac = base64(HMAC-SHA256(key = master_key,
 ```
 
 A store in this form is read once and rewritten as version 2.
+
+### 3.4 The other copies of the file
+
+The store is one witness. The other copies of the file are a second one, and an
+attacker has to deal with both. When a vault is opened, before anything is
+written, the reader looks at:
+
+```
+<vault file>.bak1 … .bak5                       beside the vault
+<mirror>/<vault file name>                      if a mirror directory is set
+<mirror>/<vault file name>.bak1 … .bak5
+```
+
+For each file that parses (§1), take the slot at the same index as the vault being
+opened. If its first 32 bytes equal this vault's salt, open it with this vault's
+`master_key` — no Argon2id — and read `revision` from its payload. Anything that
+does not parse, has a different salt, or does not authenticate says nothing about
+this vault and is skipped; that includes every copy under another password, and
+every copy of the other slot.
+
+What the reader concludes, in order:
+
+1. The record is a retired marker → a copy from before a key change.
+2. Some copy's revision is higher than the file's, and not lower than the
+   record's → the newest such copy is named. It can be put back as the vault file;
+   the file it replaces becomes `.bak1`, as with any restore.
+3. The record's revision is higher than the file's → rolled back.
+4. Otherwise the file passes, and only then is the record written.
+
+Opening an older file on purpose resets the record to it, and marks the next save
+to take a revision above every copy and record known at that moment, so the same
+question is not asked again. The file and the backups are not touched until that
+save.
+
+What remains: someone who can delete the store *and* every copy — the backups
+beside the file and the mirror — and put back a file from before this computer was
+first listed, leaves only a first visit to report. It is reported, on the way in.
 
 ---
 

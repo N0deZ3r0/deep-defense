@@ -5,9 +5,9 @@
 **Two unrelated ciphers over one password, and a file that will not say whether it holds one vault or two.**
 
 [![CI](https://github.com/N0deZ3r0/deep-defense/actions/workflows/ci.yml/badge.svg)](https://github.com/N0deZ3r0/deep-defense/actions/workflows/ci.yml)
-![version](https://img.shields.io/badge/version-1.0.0-3b5bdb)
+![version](https://img.shields.io/badge/version-1.1.0-3b5bdb)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-4c6ef5)
-![tests](https://img.shields.io/badge/tests-339-2f9e44)
+![tests](https://img.shields.io/badge/tests-374-2f9e44)
 ![Rust](https://img.shields.io/badge/Rust-1.98-dea584)
 ![install](https://img.shields.io/badge/install-none-2f9e44)
 
@@ -116,8 +116,12 @@ minute.
 
 **A tamper-evident change log**, hash-chained so a removed line is visible, and a
 **rollback record** kept outside the vault so restoring an older file is noticed. The
-record is per-machine, so the program now says out loud when it had nothing to compare
-against — which is exactly the situation a swapped file would exploit.
+record has a second witness: every open also compares the file with the backups beside
+it and with the mirror, using the key already derived, so deleting the record — or
+putting it back from the same old snapshot as the file — is not enough, and the newer
+copy can be put back from the prompt itself. Changing the master password retires the
+old key's record, so the file from just before the change cannot pass for current.
+When there really was nothing to compare against, the program says so on the way in.
 
 **The work factor can be raised later.** Argon2 parameters live in the file header and
 used to be fixed at creation, so a vault built for today's hardware would still be
@@ -139,7 +143,7 @@ auto-lock on idle and on screen lock, and a clipboard that clears itself.
 ## How it is verified
 
 ```bash
-cargo test            # 339 tests, about four minutes
+cargo test            # 365 tests, about four minutes
 cargo build --release # or build.ps1, which also records the fingerprint
 ```
 
@@ -155,6 +159,14 @@ what it may not do is bring the process down on a length the file supplied. Arou
 `shamir.rs` proves the information-theoretic claim rather than asserting it: for a
 two-of-two split of one byte, one piece plus every possible partner yields every
 possible secret exactly once.
+
+Nine tests beyond those 365, in `ui/snapshots.rs`, draw the real screens — the lock
+screen and its backups, the older-file prompt in each of its three forms, settings
+sections — with egui's own test harness, through wgpu on WARP, the software Direct3D 12
+adapter every Windows runner has. CI keeps the pictures for a person to look at, and
+every test also asserts on what is on screen, so the job fails on its own. They sit
+behind the `ui-snapshots` feature because the renderer is a large dependency the program
+never needs.
 
 `ui/widgets.rs` renders the interface with AccessKit enabled, walks the accessibility
 tree and fails if any interactive control has no name. The field helpers take that name
@@ -187,8 +199,9 @@ we decided it, and the reason is written down.
 1. **It has not been audited.** One author, no external review. The construction uses
    only well-studied primitives, but assembling proven parts is not the same as having
    the assembly checked. What can be done short of that has been: the format is
-   specified byte for byte in `docs/FORMAT.md`, and an independent implementation
-   produces the same bytes. The remaining step is a person.
+   specified byte for byte in `docs/FORMAT.md`, an independent implementation
+   produces the same bytes, and [`docs/REVIEW.md`](docs/REVIEW.md) sets out the threat
+   model and the questions for whoever looks next. The remaining step is a person.
 2. **Wiping memory is not absolute.** The OS can page a buffer out before it is
    overwritten, hibernation writes all of memory to disk regardless, and a debugger
    running as the same user reads the process through. Pinning pages is best-effort and
@@ -221,13 +234,13 @@ we decided it, and the reason is written down.
 11. **Auto-type does not check which window it is typing into.** It checks exactly one
     thing: that the window is not this program's own. The rest is the five-second
     countdown, which is there to be used.
-12. **The rollback record is tied to this computer.** On a new machine the first open
-    has nothing to compare against; the program says so, and the record can be carried
-    across by hand. Deleting the record no longer passes silently: the vault remembers,
-    inside its ciphertext, which computers it has had a record on, so a missing record on
-    one of them is reported as removed rather than taken for a first visit. The gap that
-    remains is an older copy of the file from before this computer was first listed —
-    that still looks like a first visit, and is reported as one.
+12. **Rollback protection is only as good as what is left to compare with.** Its
+    witnesses are the record on this computer, the backups beside the file and the
+    mirror. Someone who can delete all three and put back a file from before this
+    computer first saw the vault leaves nothing but a first visit to report — so a
+    first visit is reported on the way in, and only you know whether it really is
+    one. A mirror on a drive that is not always plugged in is what makes this hard.
+    On a new computer the record can be carried across by hand.
 13. **Accessibility has not been tested with a live screen reader.** The AccessKit tree
     is under test; nobody has sat down with NVDA or Narrator.
 14. **TOTP next to the password is one and a half factors.** It defeats phishing,
