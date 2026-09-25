@@ -74,6 +74,16 @@ pub fn fill2(template: &str, a: impl std::fmt::Display, b: impl std::fmt::Displa
     fill1(&fill1(template, a), b)
 }
 
+/// Substitute three values, left to right.
+pub fn fill3(
+    template: &str,
+    a: impl std::fmt::Display,
+    b: impl std::fmt::Display,
+    c: impl std::fmt::Display,
+) -> String {
+    fill1(&fill2(template, a, b), c)
+}
+
 pub struct Strings {
     pub common: Common,
     pub shell: Shell,
@@ -271,6 +281,13 @@ pub struct ErrorsText {
     pub entry_exists: &'static str,
     /// "{}" the revision on disk, "{}" the one recorded here.
     pub rollback: &'static str,
+    pub rollback_superseded: &'static str,
+    /// "{}" the revision on disk, "{}" where the newer copy is, "{}" its revision.
+    pub rollback_copy: &'static str,
+    /// "{}" is the backup's number.
+    pub copy_backup: &'static str,
+    /// "{}" is a path.
+    pub copy_mirror: &'static str,
     /// "{}" a path, "{}" the operating system's own message.
     pub io: &'static str,
 }
@@ -386,6 +403,14 @@ pub struct Shell {
     /// "{}" on-disk revision, "{}" recorded revision.
     pub rollback_body: &'static str,
     pub rollback_accept: &'static str,
+    pub superseded_title: &'static str,
+    pub superseded_body: &'static str,
+    pub newer_title: &'static str,
+    /// "{}" on-disk revision, "{}" where the newer copy is, "{}" its revision.
+    pub newer_body: &'static str,
+    pub restore_newer: &'static str,
+    pub restored_newer_title: &'static str,
+    pub restored_newer_body: &'static str,
     pub saved: &'static str,
     pub shortcut_hint: &'static str,
 }
@@ -667,6 +692,21 @@ pub static EN: Strings = Strings {
                         Either you restored a backup, or someone replaced the vault with \
                         an older copy to bring back a password you have since changed.",
         rollback_accept: "I restored this backup — open it",
+        superseded_title: "This copy is from before the key was changed",
+        superseded_body: "The key that opens this file has since been replaced on this \
+                          computer — by a new master password or a new work factor — so \
+                          this is an older copy of the vault. If the password you use now \
+                          no longer opens it, the file was swapped: restore a newer backup \
+                          rather than opening this one.",
+        newer_title: "A newer copy of this vault exists",
+        newer_body: "The vault file is revision {}, but {} is revision {} of the same \
+                     vault. Either you restored an older backup on purpose, or someone \
+                     replaced the file with an older copy. Restoring puts the newer copy \
+                     back as the vault, and the file there now becomes backup 1.",
+        restore_newer: "Restore the newer copy",
+        restored_newer_title: "The newer copy is back",
+        restored_newer_body: "It is the vault file again. The older file it replaced is now \
+                              backup 1, so nothing was thrown away.",
         saved: "Saved.",
         shortcut_hint: "Ctrl+N new · Ctrl+F search · Ctrl+L lock · Esc close",
     },
@@ -998,6 +1038,15 @@ pub static EN: Strings = Strings {
         rollback: "This vault is revision {}, but revision {} was last seen on this \
                    machine. An older copy may have been restored in place of the current \
                    one. Continue only if you restored a backup on purpose.",
+        rollback_superseded: "This vault file is from before its key was changed on this \
+                              computer — by a new master password or a new work factor — \
+                              so it is an older copy. Continue only if you restored it on \
+                              purpose.",
+        rollback_copy: "This vault is revision {}, but a newer copy of it exists — {}, \
+                        revision {}. An older copy may have been put in place of the \
+                        current one.",
+        copy_backup: "backup {} beside the vault",
+        copy_mirror: "the copy in the mirror, {}",
         io: "{}: {}",
     },
 
@@ -1075,10 +1124,12 @@ pub static EN: Strings = Strings {
                vault carried to another one arrives with nothing to compare against.",
         verified: "Checked against this computer's record",
         first_seen: "No record on this computer",
-        first_seen_body: "This is the first time this vault has been opened here, so \
-                          nothing could be compared. That is exactly the moment a \
-                          swapped file would go unnoticed. Carry the record across if \
-                          you moved the vault.",
+        first_seen_body: "This is the first time this vault has been opened on this \
+                          computer, so there was nothing to compare against — the one \
+                          moment a swapped file could pass unnoticed. If you have opened \
+                          it here before, its record was removed: check that the entries \
+                          are the ones you expect. If you moved the vault, carry its \
+                          record across.",
         unverifiable: "The record could not be read",
         unverifiable_body: "A record exists but does not authenticate, so it says \
                             nothing either way. It has been left alone.",
@@ -1166,8 +1217,9 @@ pub static EN: Strings = Strings {
                        1, so nothing is lost. The vault locks; unlock it again to use the \
                        restored version.",
         restored_title: "Backup restored",
-        restored_body: "Unlock as usual. You will be asked whether to open a version older \
-                        than the one last seen here — say yes, that is the point.",
+        restored_body: "Unlock as usual. You will be told that a newer copy exists — it is \
+                        the file you just replaced. Choose \"I restored this backup — open \
+                        it\", since that is what happened.",
         open_on_unlock: "Restore from a backup…",
         hidden_note: "If a hidden vault already existed under another password, the file \
                       as it was before is backup 1. It can be restored under Settings \
@@ -1220,6 +1272,21 @@ pub static RU: Strings = Strings {
                         восстановили резервную копию, либо кто-то подменил хранилище старой \
                         копией, чтобы вернуть пароль, который вы уже сменили.",
         rollback_accept: "Я сам восстановил копию — открыть",
+        superseded_title: "Эта копия сделана до смены ключа",
+        superseded_body: "Ключ, которым открывается этот файл, на этом компьютере с тех пор \
+                          сменили — новым мастер-паролем или новой стоимостью подбора, — \
+                          значит, перед вами старая копия хранилища. Если нынешний пароль \
+                          её больше не открывает, файл подменили: лучше восстановите более \
+                          новую резервную копию, чем открывать эту.",
+        newer_title: "Есть более новая копия этого хранилища",
+        newer_body: "В файле хранилища ревизия {}, а {} — ревизия {} того же хранилища. \
+                     Либо вы сами восстановили старую копию, либо кто-то подменил файл \
+                     старой копией. Восстановление вернёт более новую копию на место \
+                     хранилища, а нынешний файл станет копией № 1.",
+        restore_newer: "Восстановить новую копию",
+        restored_newer_title: "Новая копия возвращена",
+        restored_newer_body: "Она снова стала файлом хранилища. Старый файл, лежавший на её \
+                              месте, теперь копия № 1, так что ничего не выброшено.",
         saved: "Сохранено.",
         shortcut_hint: "Ctrl+N создать · Ctrl+F поиск · Ctrl+L заблокировать · Esc закрыть",
     },
@@ -1550,6 +1617,14 @@ pub static RU: Strings = Strings {
         rollback: "В файле ревизия {}, а на этом компьютере в последний раз была {}. \
                    Возможно, вместо текущей копии восстановили старую. Продолжайте, \
                    только если вы сами восстановили резервную копию.",
+        rollback_superseded: "Этот файл хранилища сделан до того, как на этом компьютере \
+                              сменили его ключ — мастер-пароль или стоимость подбора, — \
+                              значит, это старая копия. Продолжайте, только если вы сами \
+                              её восстановили.",
+        rollback_copy: "В файле ревизия {}, но есть более новая копия этого же хранилища — \
+                        {}, ревизия {}. Возможно, вместо текущей копии подложили старую.",
+        copy_backup: "резервная копия № {} рядом с хранилищем",
+        copy_mirror: "копия в зеркале, {}",
         io: "{}: {}",
     },
 
@@ -1617,7 +1692,11 @@ pub static RU: Strings = Strings {
         hint: "Отметка о самой свежей виденной версии, хранится вне хранилища, чтобы подмена требовала доступа сразу к двум местам. Она лежит на этом компьютере, поэтому хранилище, перенесённое на другой, приезжает без неё.",
         verified: "Сверено с записью на этом компьютере",
         first_seen: "На этом компьютере записи нет",
-        first_seen_body: "Хранилище открывается здесь впервые, сравнивать было не с чем. Это ровно тот момент, когда подменённый файл остался бы незамеченным. Если вы переносили хранилище, перенесите и запись.",
+        first_seen_body: "Хранилище открыто на этом компьютере впервые, поэтому сравнивать \
+                          было не с чем — только в этот момент подменённый файл и может \
+                          пройти незамеченным. Если вы уже открывали его здесь, значит, его \
+                          запись удалили: проверьте, что записи в хранилище те, которые вы \
+                          ожидаете. Если вы переносили хранилище, перенесите и запись.",
         unverifiable: "Запись не удалось прочитать",
         unverifiable_body: "Запись есть, но не подтверждается, значит ничего не говорит ни за, ни против. Её оставили как есть.",
         removed_title: "Запись об откате для этого хранилища пропала",
@@ -1690,9 +1769,9 @@ pub static RU: Strings = Strings {
                        копией № 1, так что ничего не потеряется. Хранилище \
                        заблокируется; откройте его снова, чтобы работать с восстановленной версией.",
         restored_title: "Копия восстановлена",
-        restored_body: "Откройте хранилище как обычно. Программа спросит, точно ли \
-                        открывать версию старше последней виденной здесь, — скажите «да», \
-                        именно этого вы и хотели.",
+        restored_body: "Откройте хранилище как обычно. Программа скажет, что есть более \
+                        новая копия, — это файл, который вы только что заменили. Выберите \
+                        «Я сам восстановил копию — открыть»: так всё и было.",
         open_on_unlock: "Восстановить из резервной копии…",
         hidden_note: "Если под другим паролем уже было скрытое хранилище, файл \
                       в прежнем виде — это копия № 1. Вернуть его можно в разделе \
@@ -1709,7 +1788,7 @@ mod tests {
     fn placeholders_match_between_languages() {
         // A translation that drops a "{}" silently loses the number it was
         // supposed to show, and one that adds an extra leaves "{}" on screen.
-        let pairs: [(&str, &str, &str); 48] = [
+        let pairs: [(&str, &str, &str); 52] = [
             ("shell.locks_in", EN.shell.locks_in, RU.shell.locks_in),
             (
                 "shell.clipboard_clears_in",
@@ -1766,6 +1845,10 @@ mod tests {
             ("entry.autotype_done", EN.entry.autotype_done, RU.entry.autotype_done),
             ("backups.entry", EN.backups.entry, RU.backups.entry),
             ("backups.confirm_body", EN.backups.confirm_body, RU.backups.confirm_body),
+            ("errors.rollback_copy", EN.errors.rollback_copy, RU.errors.rollback_copy),
+            ("errors.copy_backup", EN.errors.copy_backup, RU.errors.copy_backup),
+            ("errors.copy_mirror", EN.errors.copy_mirror, RU.errors.copy_mirror),
+            ("shell.newer_body", EN.shell.newer_body, RU.shell.newer_body),
         ];
         for (name, en, ru) in pairs {
             assert_eq!(

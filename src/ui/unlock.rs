@@ -66,7 +66,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
                     if (clicked || submitted) && can_unlock {
                         let ctx = ui.ctx().clone();
-                        app.start_unlock(&ctx, false);
+                        app.start_unlock(&ctx, crate::session::IfOlder::Refuse);
                     }
 
                     if !app.session.config.keyfiles.is_empty() {

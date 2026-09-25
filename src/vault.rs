@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 use crate::config::{app_dir, ensure_app_dir};
 use crate::crypto::{self, KdfParams};
 use crate::slots::{self, SlotFile};
-use crate::errors::{Error, Result};
+use crate::errors::{CopyAt, Error, Evidence, Result};
 use crate::model::{AuditAction, Entry, VaultData};
 use crate::secret::{Key, Secret};
 
@@ -52,6 +52,10 @@ const ANCHOR_SEALED_LEN: usize = ANCHOR_NONCE_LEN + 8 + 16;
 /// untouched longest go first.
 const MAX_ANCHOR_ENTRIES: usize = 64;
 const MACHINE_TAG_CONTEXT: &[u8] = b"deep-defense/machine/v1";
+/// Sealed in place of a revision when the key a record was kept under goes
+/// out of use. Any file that key still opens is from before the change, and no
+/// revision it could carry is new enough.
+const RETIRED: u64 = u64::MAX;
 
 /// One slot's record in the store.
 ///
@@ -126,6 +130,85 @@ fn placeholder_seal() -> Option<String> {
     let mut raw = [0u8; ANCHOR_SEALED_LEN];
     crypto::random_bytes(&mut raw).ok()?;
     Some(BASE64.encode(raw))
+}
+
+/// The key a slot's record is sealed under, from that slot's master key.
+fn record_key(master_key: &Key) -> Option<Key> {
+    let hkdf = hkdf::Hkdf::<Sha256>::new(None, master_key.as_bytes());
+    let mut key = Key::zeroed();
+    hkdf.expand(ANCHOR_SEAL_INFO, key.as_mut()).ok()?;
+    Some(key)
+}
+
+fn seal_revision(master_key: &Key, id: &str, revision: u64) -> Option<String> {
+    use chacha20poly1305::aead::{Aead, Payload};
+    use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
+
+    let key = record_key(master_key)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes()).ok()?;
+    // Random, not derived: the same key seals this record every time it is
+    // written, so the nonce is what keeps two writes from colliding.
+    let mut nonce = [0u8; ANCHOR_NONCE_LEN];
+    crypto::random_bytes(&mut nonce).ok()?;
+    let body = cipher
+        .encrypt(
+            &XNonce::from(nonce),
+            Payload {
+                msg: &revision.to_be_bytes(),
+                aad: id.as_bytes(),
+            },
+        )
+        .ok()?;
+    let mut raw = nonce.to_vec();
+    raw.extend_from_slice(&body);
+    Some(BASE64.encode(raw))
+}
+
+fn open_revision(master_key: &Key, entry: &AnchorEntry) -> Option<u64> {
+    use chacha20poly1305::aead::{Aead, Payload};
+    use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
+
+    let raw = BASE64.decode(&entry.sealed).ok()?;
+    if raw.len() != ANCHOR_SEALED_LEN {
+        return None;
+    }
+    let (nonce, body) = raw.split_at(ANCHOR_NONCE_LEN);
+    let nonce: [u8; ANCHOR_NONCE_LEN] = nonce.try_into().ok()?;
+    let key = record_key(master_key)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes()).ok()?;
+    let plain = cipher
+        .decrypt(
+            &XNonce::from(nonce),
+            Payload {
+                msg: body,
+                aad: entry.id.as_bytes(),
+            },
+        )
+        .ok()?;
+    let bytes: [u8; 8] = plain.as_slice().try_into().ok()?;
+    Some(u64::from_be_bytes(bytes))
+}
+
+/// The record that says a key is no longer used for `slot`.
+fn retired_record(master_key: &Key, salt: &[u8], slot: usize) -> Option<AnchorEntry> {
+    let id = id_for(salt, slot);
+    let sealed = seal_revision(master_key, &id, RETIRED)?;
+    Some(AnchorEntry { id, sealed })
+}
+
+/// The revision written inside a slot's decrypted contents.
+///
+/// Read on its own rather than by parsing the whole vault: comparing copies
+/// only needs the number, and every entry parsed is one more copy of a secret
+/// to wipe.
+fn revision_of(payload: &[u8]) -> Option<u64> {
+    #[derive(Deserialize)]
+    struct Revision {
+        revision: u64,
+    }
+    serde_json::from_slice::<Revision>(payload)
+        .ok()
+        .map(|found| found.revision)
 }
 
 /// This computer's identity, as far as the vault is concerned.
@@ -291,6 +374,13 @@ pub struct Vault {
     dirty: bool,
     /// What the last rollback check established. Reported, not enforced.
     anchor: AnchorState,
+    /// A revision the next save has to go past.
+    ///
+    /// Set when the user opens an older file on purpose: a newer copy is still
+    /// lying about, and unless the file saved next outranks it, every later
+    /// open would ask the same question about the version the user has just
+    /// said is the one they want.
+    outrank: u64,
     /// A second directory to copy every save into.
     ///
     /// The rotation of `.bak` files lives beside the vault, which makes five
@@ -361,6 +451,7 @@ impl Vault {
             // A vault created here is the newest thing there is; the anchor
             // written by the save below is authoritative from that moment.
             anchor: AnchorState::Verified,
+            outrank: 0,
             mirror: None,
             mirror_error: None,
         };
@@ -375,6 +466,22 @@ impl Vault {
     /// password did not open anything — the program must behave identically
     /// whether or not a second vault exists.
     pub fn open(path: &Path, secret: &Secret, allow_rollback: bool) -> Result<Self> {
+        Self::open_with_mirror(path, secret, allow_rollback, None)
+    }
+
+    /// Open, comparing the file with the copies in `mirror` as well as with
+    /// the backups beside it.
+    ///
+    /// A copy newer than the file is the one sign of a swapped-in older file
+    /// that survives the record on this computer being deleted — or being put
+    /// back from the same old snapshot as the file. The mirror counts most:
+    /// it is the copy least likely to be within the same reach.
+    pub fn open_with_mirror(
+        path: &Path,
+        secret: &Secret,
+        allow_rollback: bool,
+        mirror: Option<&Path>,
+    ) -> Result<Self> {
         let bytes = std::fs::read(path).map_err(|e| Error::io(path.to_path_buf(), e))?;
         let file = SlotFile::parse(&bytes)?;
         let (slot, opened) = file.open_any(secret)?;
@@ -395,17 +502,23 @@ impl Vault {
             master_key: opened.master_key,
             dirty: false,
             anchor: AnchorState::Verified,
-            mirror: None,
+            outrank: 0,
+            mirror: mirror.map(Path::to_path_buf),
             mirror_error: None,
         };
 
         vault.anchor = if allow_rollback {
-            // The user chose to open an older file knowingly. Reset the
-            // anchor to it, or every later open would report the same thing.
-            vault.write_anchor();
-            AnchorState::Verified
+            vault.accept_older(mirror)
         } else {
-            vault.check_rollback()?
+            // Checked before anything is written, so a refusal leaves the
+            // record exactly as it found it.
+            let state = vault.check_age(mirror)?;
+            // An unreadable record stays where it is, as evidence: whatever
+            // put it there, overwriting it now would destroy the only trace.
+            if state != AnchorState::Unverifiable {
+                vault.write_anchor();
+            }
+            state
         };
 
         // The first open on a computer is saved at once, so that from here on
@@ -549,61 +662,15 @@ impl Vault {
         Ok(mac.finalize().into_bytes().to_vec())
     }
 
-    /// The key the stored revision is sealed under.
-    fn anchor_key(&self) -> Option<Key> {
-        let hkdf = hkdf::Hkdf::<Sha256>::new(None, self.master_key.as_bytes());
-        let mut key = Key::zeroed();
-        hkdf.expand(ANCHOR_SEAL_INFO, key.as_mut()).ok()?;
-        Some(key)
-    }
-
-    fn seal_revision(&self, id: &str, revision: u64) -> Option<String> {
-        use chacha20poly1305::aead::{Aead, Payload};
-        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-
-        let key = self.anchor_key()?;
-        let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes()).ok()?;
-        // Random, not derived: the same key seals this record every time it is
-        // written, so the nonce is what keeps two writes from colliding.
-        let mut nonce = [0u8; ANCHOR_NONCE_LEN];
-        crypto::random_bytes(&mut nonce).ok()?;
-        let body = cipher
-            .encrypt(
-                &XNonce::from(nonce),
-                Payload {
-                    msg: &revision.to_be_bytes(),
-                    aad: id.as_bytes(),
-                },
-            )
-            .ok()?;
-        let mut raw = nonce.to_vec();
-        raw.extend_from_slice(&body);
-        Some(BASE64.encode(raw))
-    }
-
-    fn open_revision(&self, entry: &AnchorEntry) -> Option<u64> {
-        use chacha20poly1305::aead::{Aead, Payload};
-        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-
-        let raw = BASE64.decode(&entry.sealed).ok()?;
-        if raw.len() != ANCHOR_SEALED_LEN {
-            return None;
-        }
-        let (nonce, body) = raw.split_at(ANCHOR_NONCE_LEN);
-        let nonce: [u8; ANCHOR_NONCE_LEN] = nonce.try_into().ok()?;
-        let key = self.anchor_key()?;
-        let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes()).ok()?;
-        let plain = cipher
-            .decrypt(
-                &XNonce::from(nonce),
-                Payload {
-                    msg: body,
-                    aad: entry.id.as_bytes(),
-                },
-            )
-            .ok()?;
-        let bytes: [u8; 8] = plain.as_slice().try_into().ok()?;
-        Some(u64::from_be_bytes(bytes))
+    /// Whether a record in the form earlier builds wrote was written for this
+    /// vault by its key.
+    fn legacy_is_genuine(&self, anchor: &Anchor) -> bool {
+        anchor.vault_id == self.vault_id()
+            && BASE64
+                .decode(&anchor.mac)
+                .ok()
+                .zip(self.anchor_mac(anchor.revision).ok())
+                .is_some_and(|(recorded, expected)| constant_time_eq(&expected, &recorded))
     }
 
     /// Record the current revision. Failure here degrades rollback detection
@@ -615,8 +682,20 @@ impl Vault {
     /// exists, and a hidden vault opened here later finds a slot waiting.
     /// A record some other vault wrote is never touched.
     fn write_anchor(&self) {
+        self.write_records(Vec::new());
+    }
+
+    /// Write this vault's record, and `given` beside it.
+    ///
+    /// `given` are records sealed under other keys: the marker left for a key
+    /// this vault no longer uses, or the fresh record of a slot a rebuild
+    /// carried across under a new key. Each replaces whatever the store holds
+    /// under the same identifier.
+    fn write_records(&self, mut given: Vec<AnchorEntry>) {
         let own = self.vault_id();
-        let Some(sealed) = self.seal_revision(&own, self.data.revision) else {
+        // This vault's own record is always the one sealed here and now.
+        given.retain(|entry| entry.id != own);
+        let Some(sealed) = seal_revision(&self.master_key, &own, self.data.revision) else {
             return;
         };
         let mut store = match read_anchors() {
@@ -641,6 +720,8 @@ impl Vault {
                     id,
                     sealed: sealed.clone(),
                 }
+            } else if let Some(at) = given.iter().position(|entry| entry.id == id) {
+                given.remove(at)
             } else if let Some(entry) = existing {
                 entry
             } else {
@@ -651,6 +732,14 @@ impl Vault {
             };
             this_file.push(entry);
         }
+        // What is left of `given` belongs to no slot of this file any more:
+        // identifiers a password change retired. They go just ahead of the
+        // file's own records, so they are dropped after everything older and
+        // before the records still in use.
+        store
+            .entries
+            .retain(|entry| !given.iter().any(|retired| retired.id == entry.id));
+        store.entries.extend(given);
         store.entries.extend(this_file);
         let excess = store.entries.len().saturating_sub(MAX_ANCHOR_ENTRIES);
         store.entries.drain(..excess);
@@ -668,59 +757,170 @@ impl Vault {
         }
     }
 
+    /// Everything that could show this file to be older than it should be.
+    ///
+    /// Two independent witnesses: the record kept on this computer, and the
+    /// other copies of the file — the backups beside it and the mirror. Either
+    /// can be missing; an attacker has to deal with both.
+    fn check_age(&self, mirror: Option<&Path>) -> Result<AnchorState> {
+        let recorded = self.check_rollback();
+        if let Err(Error::Rollback {
+            evidence: Evidence::Superseded,
+            ..
+        }) = &recorded
+        {
+            // A copy from before a password change. Any newer copy this key
+            // opens is from before the change too, so there is nothing better
+            // to offer than the truth.
+            return recorded;
+        }
+        let record = match &recorded {
+            Err(Error::Rollback {
+                evidence: Evidence::Record { revision },
+                ..
+            }) => Some(*revision),
+            _ => None,
+        };
+        if let Some((revision, at)) = self.newest_copy(mirror) {
+            // Offered only when putting that copy back would settle it: one
+            // still behind the record would just be refused in its turn.
+            if revision > self.data.revision && record.is_none_or(|record| revision >= record) {
+                return Err(Error::Rollback {
+                    on_disk: self.data.revision,
+                    evidence: Evidence::Copy { revision, at },
+                });
+            }
+        }
+        recorded
+    }
+
+    /// What the record on this computer says. Writes nothing.
     fn check_rollback(&self) -> Result<AnchorState> {
         // Whether this vault has had a record on this computer before — the
         // one fact that separates "the record was deleted" from "never here".
         let seen_here = self.seen_on_this_machine();
         let own = self.vault_id();
+        let behind = |revision: u64| Error::Rollback {
+            on_disk: self.data.revision,
+            evidence: if revision == RETIRED {
+                Evidence::Superseded
+            } else {
+                Evidence::Record { revision }
+            },
+        };
 
-        let state = match read_anchors() {
-            // Kept as it is: whatever put it there, overwriting it now would
-            // destroy the only evidence.
-            StoredAnchors::Unreadable => return Ok(AnchorState::Unverifiable),
-            StoredAnchors::Missing => absent_record(seen_here),
+        match read_anchors() {
+            StoredAnchors::Unreadable => Ok(AnchorState::Unverifiable),
+            StoredAnchors::Missing => Ok(absent_record(seen_here)),
             StoredAnchors::Legacy(anchor) => {
                 if anchor.vault_id != own {
-                    absent_record(seen_here)
+                    Ok(absent_record(seen_here))
+                } else if !self.legacy_is_genuine(&anchor) {
+                    Ok(AnchorState::Unverifiable)
+                } else if anchor.revision > self.data.revision {
+                    Err(behind(anchor.revision))
                 } else {
-                    let genuine = BASE64
-                        .decode(&anchor.mac)
-                        .ok()
-                        .zip(self.anchor_mac(anchor.revision).ok())
-                        .is_some_and(|(recorded, expected)| constant_time_eq(&expected, &recorded));
-                    if !genuine {
-                        return Ok(AnchorState::Unverifiable);
-                    }
-                    if anchor.revision > self.data.revision {
-                        return Err(Error::Rollback {
-                            on_disk: self.data.revision,
-                            expected: anchor.revision,
-                        });
-                    }
-                    AnchorState::Verified
+                    Ok(AnchorState::Verified)
                 }
             }
             StoredAnchors::Store(store) => match store.entries.iter().find(|entry| entry.id == own) {
-                None => absent_record(seen_here),
-                Some(entry) => match self.open_revision(entry) {
-                    Some(revision) if revision > self.data.revision => {
-                        return Err(Error::Rollback {
-                            on_disk: self.data.revision,
-                            expected: revision,
-                        })
-                    }
-                    Some(_) => AnchorState::Verified,
+                None => Ok(absent_record(seen_here)),
+                Some(entry) => match open_revision(&self.master_key, entry) {
+                    Some(revision) if revision > self.data.revision => Err(behind(revision)),
+                    Some(_) => Ok(AnchorState::Verified),
                     // A record under this vault's identifier that its key
                     // cannot open. After this vault has been here, that is a
                     // record replaced or tampered with. Before, it is the
                     // placeholder the other slot of this file left for it.
-                    None if seen_here => return Ok(AnchorState::Unverifiable),
-                    None => AnchorState::FirstSeenHere,
+                    None if seen_here => Ok(AnchorState::Unverifiable),
+                    None => Ok(AnchorState::FirstSeenHere),
                 },
             },
-        };
+        }
+    }
+
+    /// The revision this computer's record holds for this vault, when there
+    /// is one this vault's key can read. A retired key's marker is not a
+    /// revision anything could catch up with, so it counts as none.
+    fn recorded_revision(&self) -> Option<u64> {
+        let own = self.vault_id();
+        match read_anchors() {
+            StoredAnchors::Store(store) => store
+                .entries
+                .iter()
+                .find(|entry| entry.id == own)
+                .and_then(|entry| open_revision(&self.master_key, entry))
+                .filter(|revision| *revision != RETIRED),
+            StoredAnchors::Legacy(anchor) if self.legacy_is_genuine(&anchor) => {
+                Some(anchor.revision)
+            }
+            _ => None,
+        }
+    }
+
+    /// The newest revision of this vault held in any other copy of the file,
+    /// and where that copy is.
+    ///
+    /// Only copies this vault's own key opens count: a copy under another
+    /// password, or of the other slot, says nothing about this one — and
+    /// trying the key on it reveals nothing either, since failing to open is
+    /// all a slot ever does for the wrong key.
+    fn newest_copy(&self, mirror: Option<&Path>) -> Option<(u64, CopyAt)> {
+        let mut copies: Vec<(PathBuf, CopyAt)> = (1..=BACKUP_COUNT)
+            .map(|index| (backup_path_for(&self.path, index), CopyAt::Backup(index)))
+            .collect();
+        if let (Some(directory), Some(name)) = (mirror, self.path.file_name()) {
+            let target = directory.join(name);
+            if target != self.path {
+                copies.push((target.clone(), CopyAt::Mirror(target.clone())));
+                for index in 1..=BACKUP_COUNT {
+                    let backup = backup_path_for(&target, index);
+                    copies.push((backup.clone(), CopyAt::Mirror(backup)));
+                }
+            }
+        }
+        copies
+            .into_iter()
+            .filter_map(|(path, at)| Some((self.revision_in(&path)?, at)))
+            .max_by_key(|(revision, _)| *revision)
+    }
+
+    /// The revision of this vault in another file, if this vault's key opens
+    /// its slot there.
+    fn revision_in(&self, path: &Path) -> Option<u64> {
+        let bytes = std::fs::read(path).ok()?;
+        let file = SlotFile::parse(&bytes).ok()?;
+        // Cheaper than a failed decryption, and just as certain: the salt is
+        // the first thing in the slot, and a different one means a different
+        // key made it.
+        if file.slot_salt(self.slot) != self.salt.as_slice() {
+            return None;
+        }
+        let payload = file.open_slot_with_key(self.slot, &self.master_key).ok()?;
+        revision_of(&payload)
+    }
+
+    /// The user chose to open an older file knowingly.
+    ///
+    /// The record is reset to it, as it always was. And the next save is made
+    /// to outrank every copy and record known here: the user has said this is
+    /// the version they want, and asking again on every open would be asking
+    /// them to say it again.
+    fn accept_older(&mut self, mirror: Option<&Path>) -> AnchorState {
+        let newest = [
+            self.recorded_revision(),
+            self.newest_copy(mirror).map(|(revision, _)| revision),
+        ]
+        .into_iter()
+        .flatten()
+        .max();
         self.write_anchor();
-        Ok(state)
+        if let Some(newest) = newest.filter(|newest| *newest > self.data.revision) {
+            self.outrank = newest;
+            // Saved at the latest when it locks, which is what settles it.
+            self.dirty = true;
+        }
+        AnchorState::Verified
     }
 
     // ------------------------------------------------------ which computers
@@ -810,7 +1010,9 @@ impl Vault {
         if anchor.revision > self.data.revision {
             return Err(Error::Rollback {
                 on_disk: self.data.revision,
-                expected: anchor.revision,
+                evidence: Evidence::Record {
+                    revision: anchor.revision,
+                },
             });
         }
 
@@ -849,6 +1051,9 @@ impl Vault {
     /// file: adopting slots from the old one would mean adopting its header,
     /// which is the very thing being changed.
     fn persist(&mut self) -> Result<()> {
+        if self.data.revision < self.outrank {
+            self.data.revision = self.outrank;
+        }
         self.data.bump();
         let payload = Zeroizing::new(
             serde_json::to_vec(&self.data)
@@ -1030,6 +1235,15 @@ impl Vault {
         };
 
         let mut fresh = slots::SlotFile::new_random(header)?;
+        // Records written once the new file is safely on disk. A new work
+        // factor means new salts, so every slot that moves gets a new
+        // identifier — and the old ones have to be retired, or a copy of the
+        // file from before the rebuild would pass for current on the strength
+        // of a record nothing updates any more.
+        let mut records = Vec::new();
+        if kdf_changed {
+            records.extend(retired_record(&self.master_key, &self.salt, self.slot));
+        }
 
         // Derived against the *new* header, so the cost written into the file
         // and the cost the key was made with are the same thing.
@@ -1056,6 +1270,19 @@ impl Vault {
                 None => (&opened.master_key, opened.salt.as_slice()),
             };
             fresh.write_slot(other_index, &opened.payload, key, salt)?;
+
+            // The carried vault moves to a new identifier too. Without a
+            // record there, its next open here would find none and — having
+            // been here before — report the record as deleted.
+            if let Some((new_key, new_salt)) = &re {
+                records.extend(retired_record(&opened.master_key, &opened.salt, other_index));
+                if let Some(revision) = revision_of(&opened.payload) {
+                    let id = id_for(new_salt, other_index);
+                    if let Some(sealed) = seal_revision(new_key, &id, revision) {
+                        records.push(AnchorEntry { id, sealed });
+                    }
+                }
+            }
         }
 
         self.file = fresh;
@@ -1085,6 +1312,9 @@ impl Vault {
         // `persist`, not `save`: re-reading would pull slots sealed against
         // the old header, which no longer authenticates them.
         self.persist()?;
+        if !records.is_empty() {
+            self.write_records(records);
+        }
 
         Ok(MigrationReport {
             old_capacity,
@@ -1176,7 +1406,18 @@ impl Vault {
         let old_salt = std::mem::replace(&mut self.salt, new_salt);
 
         match self.save() {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                // Every copy of the file from before this moment still opens
+                // under the old password, and the record kept for it here
+                // would go on vouching for the last of them. Retire it, so
+                // that copy is recognised for what it is.
+                self.write_records(
+                    retired_record(&old_key, &old_salt, self.slot)
+                        .into_iter()
+                        .collect(),
+                );
+                Ok(())
+            }
             Err(e) => {
                 // Put the working key back so the caller still holds an open
                 // vault they can retry or save under the previous password.
@@ -2618,5 +2859,425 @@ mod tests {
             "a tag, never the identity itself"
         );
         assert!(!format!("{:?}", vault.data).contains(&vault.data.machine_key.0));
+    }
+
+    // ------------------------------------------- keys retired, copies compared
+
+    fn evidence(err: Error) -> Evidence {
+        match err {
+            Error::Rollback { evidence, .. } => evidence,
+            other => panic!("expected an older file to be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_copy_from_before_a_password_change_is_recognised() {
+        // The attack the rollback message has always described: put back the
+        // file from before the password was changed, and wait for the old
+        // password to be tried. Its record used to vouch for it, because
+        // nothing updated the record of a key that was no longer in use.
+        let dir = TempDir::new("retire-password");
+        let old = Secret::from_str("the old password");
+        let new = Secret::from_str("the new password");
+        let mut vault = small_vault(&dir.vault(), &old);
+        vault.add(sample_entry("Bank", "before")).unwrap();
+        vault.save().unwrap();
+        let before_the_change = std::fs::read(dir.vault()).unwrap();
+        vault.change_master(&new).unwrap();
+        drop(vault);
+
+        std::fs::write(dir.vault(), &before_the_change).unwrap();
+        let refused = Vault::open(&dir.vault(), &old, false).unwrap_err();
+        assert_eq!(evidence(refused), Evidence::Superseded);
+    }
+
+    #[test]
+    fn the_new_password_is_not_troubled_by_the_retired_record() {
+        let dir = TempDir::new("retire-new-fine");
+        let old = Secret::from_str("the old password");
+        let new = Secret::from_str("the new password");
+        let mut vault = small_vault(&dir.vault(), &old);
+        vault.change_master(&new).unwrap();
+        drop(vault);
+
+        for _ in 0..2 {
+            let opened = Vault::open(&dir.vault(), &new, false).unwrap();
+            assert_eq!(opened.anchor_state(), AnchorState::Verified);
+        }
+    }
+
+    #[test]
+    fn a_superseded_copy_can_still_be_opened_on_purpose_and_then_stops_asking() {
+        // Restoring a backup from before a password change is a thing people
+        // do. It is asked about, not forbidden.
+        let dir = TempDir::new("retire-accept");
+        let old = Secret::from_str("the old password");
+        let new = Secret::from_str("the new password");
+        let mut vault = small_vault(&dir.vault(), &old);
+        let before_the_change = std::fs::read(dir.vault()).unwrap();
+        vault.change_master(&new).unwrap();
+        drop(vault);
+
+        std::fs::write(dir.vault(), &before_the_change).unwrap();
+        drop(Vault::open(&dir.vault(), &old, true).unwrap());
+        let again = Vault::open(&dir.vault(), &old, false).unwrap();
+        assert_eq!(again.anchor_state(), AnchorState::Verified);
+    }
+
+    #[test]
+    fn a_retired_record_looks_like_every_other_record() {
+        // The store sits outside the vault. A marker that could be told from
+        // a live record would show how many times the password was changed.
+        let dir = TempDir::new("retire-shape");
+        let mut vault = small_vault(&dir.vault(), &Secret::from_str("first"));
+        vault.change_master(&Secret::from_str("second")).unwrap();
+        vault.change_master(&Secret::from_str("third")).unwrap();
+        drop(vault);
+
+        let text = std::fs::read_to_string(anchor_path()).unwrap();
+        let store: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let entries = store["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), slots::SLOT_COUNT + 2, "two keys retired");
+        let lengths: Vec<_> = entries
+            .iter()
+            .map(|e| e["sealed"].as_str().unwrap().len())
+            .collect();
+        assert!(lengths.windows(2).all(|pair| pair[0] == pair[1]), "{lengths:?}");
+        assert!(!text.contains("retired") && !text.contains("revision"));
+    }
+
+    #[test]
+    fn a_new_work_factor_retires_the_old_key_too() {
+        // Same password, new salt, new key: the file from before the rebuild
+        // opens under it and must not pass for current.
+        let dir = TempDir::new("retire-rekey");
+        let secret = Secret::from_str("stays the same");
+        let mut vault = small_vault(&dir.vault(), &secret);
+        vault.add(sample_entry("Bank", "before")).unwrap();
+        vault.save().unwrap();
+        let before_the_rebuild = std::fs::read(dir.vault()).unwrap();
+        vault
+            .rebuild(slots::MIN_SLOT_CAPACITY, stronger_params(), Some(&secret), None)
+            .unwrap();
+        drop(vault);
+
+        let rebuilt = Vault::open(&dir.vault(), &secret, false).unwrap();
+        assert_eq!(rebuilt.anchor_state(), AnchorState::Verified);
+        drop(rebuilt);
+
+        std::fs::write(dir.vault(), &before_the_rebuild).unwrap();
+        let refused = Vault::open(&dir.vault(), &secret, false).unwrap_err();
+        assert_eq!(evidence(refused), Evidence::Superseded);
+    }
+
+    #[test]
+    fn a_vault_carried_through_a_new_work_factor_keeps_its_record() {
+        // It moves to a new salt with the rest of the file. Without a record
+        // under its new identifier, its next open here — a computer it has
+        // been on — would report the record as deleted.
+        let dir = TempDir::new("retire-carried");
+        let decoy_secret = Secret::from_str("the decoy one");
+        let hidden_secret = Secret::from_str("the hidden one");
+        let decoy = small_vault(&dir.vault(), &decoy_secret);
+        let mut hidden = decoy.create_hidden(&hidden_secret).unwrap();
+        hidden.add(sample_entry("Real", "invisible")).unwrap();
+        hidden.save().unwrap();
+        drop(hidden);
+        drop(decoy);
+        let before_the_rebuild = std::fs::read(dir.vault()).unwrap();
+
+        let mut decoy = Vault::open(&dir.vault(), &decoy_secret, false).unwrap();
+        decoy
+            .rebuild(
+                slots::MIN_SLOT_CAPACITY,
+                stronger_params(),
+                Some(&decoy_secret),
+                Some(&hidden_secret),
+            )
+            .unwrap();
+        drop(decoy);
+
+        let hidden = Vault::open(&dir.vault(), &hidden_secret, false).unwrap();
+        assert_eq!(hidden.anchor_state(), AnchorState::Verified);
+        assert_eq!(hidden.data.entries[0].password, "invisible");
+        drop(hidden);
+
+        // And its old key is retired like the decoy's.
+        std::fs::write(dir.vault(), &before_the_rebuild).unwrap();
+        let refused = Vault::open(&dir.vault(), &hidden_secret, false).unwrap_err();
+        assert_eq!(evidence(refused), Evidence::Superseded);
+    }
+
+    /// Saved `saves` times after creation, then the vault file replaced by
+    /// backup `older` — the swap an attacker makes. Returns the newest
+    /// revision still on disk among the backups.
+    fn swapped(dir: &TempDir, secret: &Secret, saves: usize, older: usize) -> u64 {
+        let mut vault = small_vault(&dir.vault(), secret);
+        for index in 0..saves {
+            vault.add(sample_entry(&format!("Site {index}"), "pw")).unwrap();
+            vault.save().unwrap();
+        }
+        let newest_backup = vault.data.revision - 1;
+        drop(vault);
+        std::fs::copy(backup_path(&dir.vault(), older), dir.vault()).unwrap();
+        newest_backup
+    }
+
+    #[test]
+    fn a_newer_backup_gives_away_an_older_file_when_the_record_is_gone() {
+        // Deleting the record used to leave nothing to compare against. The
+        // backups the vault keeps beside itself are a second witness.
+        let dir = TempDir::new("copies-backup");
+        let secret = Secret::from_str("compare me");
+        let newest = swapped(&dir, &secret, 4, 3);
+        std::fs::remove_file(anchor_path()).unwrap();
+
+        let refused = Vault::open(&dir.vault(), &secret, false).unwrap_err();
+        assert_eq!(
+            evidence(refused),
+            Evidence::Copy {
+                revision: newest,
+                at: CopyAt::Backup(1),
+            }
+        );
+        assert!(
+            !anchor_path().exists(),
+            "a refused open leaves the record exactly as it found it"
+        );
+    }
+
+    #[test]
+    fn a_restored_backup_names_the_file_it_replaced() {
+        // Both witnesses object, and the copy is what gets said: it is the
+        // one thing that can be put back. After a restore made on purpose it
+        // is the file that was just replaced, which is what the person
+        // restoring expects to be told.
+        let dir = TempDir::new("copies-both");
+        let secret = Secret::from_str("compare me");
+        let mut vault = small_vault(&dir.vault(), &secret);
+        for index in 0..3 {
+            vault.add(sample_entry(&format!("Site {index}"), "pw")).unwrap();
+            vault.save().unwrap();
+        }
+        let newest = vault.data.revision;
+        drop(vault);
+
+        restore_backup(&dir.vault(), 2).unwrap();
+        let refused = Vault::open(&dir.vault(), &secret, false).unwrap_err();
+        assert_eq!(
+            evidence(refused),
+            Evidence::Copy {
+                revision: newest,
+                at: CopyAt::Backup(1),
+            }
+        );
+    }
+
+    #[test]
+    fn a_copy_behind_the_record_is_not_offered_as_the_answer() {
+        // Putting it back would only be refused in turn: the record is newer
+        // still. Then the record is what gets said.
+        let dir = TempDir::new("copies-behind-record");
+        let secret = Secret::from_str("compare me");
+        let mut vault = small_vault(&dir.vault(), &secret);
+        for index in 0..3 {
+            vault.add(sample_entry(&format!("Site {index}"), "pw")).unwrap();
+            vault.save().unwrap();
+        }
+        let recorded = vault.data.revision;
+        drop(vault);
+        // The newest file is gone. Backup 1 is newer than what is left in its
+        // place, but older than the record.
+        std::fs::copy(backup_path(&dir.vault(), 2), dir.vault()).unwrap();
+
+        let refused = Vault::open(&dir.vault(), &secret, false).unwrap_err();
+        assert_eq!(evidence(refused), Evidence::Record { revision: recorded });
+    }
+
+    #[test]
+    fn a_record_put_back_along_with_the_file_is_caught_by_the_copies() {
+        // Restoring the whole settings folder from the same old snapshot as
+        // the file makes the record agree with it. The backups do not.
+        let dir = TempDir::new("copies-snapshot");
+        let secret = Secret::from_str("compare me");
+        let mut vault = small_vault(&dir.vault(), &secret);
+        vault.save().unwrap();
+        let old_file = std::fs::read(dir.vault()).unwrap();
+        let old_record = std::fs::read(anchor_path()).unwrap();
+        for index in 0..2 {
+            vault.add(sample_entry(&format!("Later {index}"), "pw")).unwrap();
+            vault.save().unwrap();
+        }
+        let newest = vault.data.revision;
+        drop(vault);
+
+        // bak1 now holds the file one save before the newest.
+        std::fs::write(dir.vault(), &old_file).unwrap();
+        std::fs::write(anchor_path(), &old_record).unwrap();
+        let refused = Vault::open(&dir.vault(), &secret, false).unwrap_err();
+        assert_eq!(
+            evidence(refused),
+            Evidence::Copy {
+                revision: newest - 1,
+                at: CopyAt::Backup(1),
+            }
+        );
+    }
+
+    #[test]
+    fn the_mirror_is_a_witness_too() {
+        let dir = TempDir::new("copies-mirror");
+        let secret = Secret::from_str("compare me");
+        let mirror = dir.path.join("mirror");
+        let mut vault = small_vault(&dir.vault(), &secret);
+        vault.set_mirror(Some(mirror.clone()));
+        let early = std::fs::read(dir.vault()).unwrap();
+        for index in 0..2 {
+            vault.add(sample_entry(&format!("Later {index}"), "pw")).unwrap();
+            vault.save().unwrap();
+        }
+        let newest = vault.data.revision;
+        drop(vault);
+
+        std::fs::write(dir.vault(), &early).unwrap();
+        for backup in list_backups(&dir.vault()) {
+            std::fs::remove_file(backup.path).unwrap();
+        }
+        std::fs::remove_file(anchor_path()).unwrap();
+
+        // Without the mirror there is nothing left to say it.
+        assert!(Vault::open(&dir.vault(), &secret, false).is_ok());
+        std::fs::write(dir.vault(), &early).unwrap();
+        std::fs::remove_file(anchor_path()).unwrap();
+        for backup in list_backups(&dir.vault()) {
+            std::fs::remove_file(backup.path).unwrap();
+        }
+
+        let refused = Vault::open_with_mirror(&dir.vault(), &secret, false, Some(&mirror))
+            .unwrap_err();
+        assert_eq!(
+            evidence(refused),
+            Evidence::Copy {
+                revision: newest,
+                at: CopyAt::Mirror(mirror.join("vault.ddv")),
+            }
+        );
+    }
+
+    #[test]
+    fn a_different_vault_in_the_mirror_is_no_witness() {
+        // Same file name, higher revision, other salt: it is not a copy of
+        // this vault, and its revision means nothing here.
+        let dir = TempDir::new("copies-stranger");
+        let secret = Secret::from_str("compare me");
+        let mirror = dir.path.join("mirror");
+        std::fs::create_dir_all(&mirror).unwrap();
+        drop(small_vault(&dir.vault(), &secret));
+
+        let mut stranger = small_vault(&mirror.join("vault.ddv"), &secret);
+        for _ in 0..5 {
+            stranger.mark_dirty();
+            stranger.save().unwrap();
+        }
+        drop(stranger);
+
+        let opened =
+            Vault::open_with_mirror(&dir.vault(), &secret, false, Some(&mirror)).unwrap();
+        assert_eq!(opened.anchor_state(), AnchorState::Verified);
+    }
+
+    #[test]
+    fn the_other_slot_moving_on_is_no_evidence_against_this_one() {
+        // Backups hold both slots. The hidden vault's saves make its own slot
+        // newer in every backup; the decoy's slot in them is unchanged, and
+        // only the decoy's slot is what the decoy compares.
+        let dir = TempDir::new("copies-slots");
+        let decoy_secret = Secret::from_str("the decoy");
+        let hidden_secret = Secret::from_str("the hidden one");
+        let decoy = small_vault(&dir.vault(), &decoy_secret);
+        let mut hidden = decoy.create_hidden(&hidden_secret).unwrap();
+        drop(decoy);
+        for index in 0..3 {
+            hidden.add(sample_entry(&format!("Real {index}"), "pw")).unwrap();
+            hidden.save().unwrap();
+        }
+        drop(hidden);
+
+        let decoy = Vault::open(&dir.vault(), &decoy_secret, false).unwrap();
+        assert_eq!(decoy.anchor_state(), AnchorState::Verified);
+    }
+
+    #[test]
+    fn opening_an_older_file_on_purpose_leaves_it_untouched_until_the_next_save() {
+        // A restore has to stay undoable by restoring backup 1, so saying
+        // "yes, open it" must not rotate the backups by itself.
+        let dir = TempDir::new("copies-accept-untouched");
+        let secret = Secret::from_str("compare me");
+        swapped(&dir, &secret, 3, 2);
+        let on_disk = std::fs::read(dir.vault()).unwrap();
+        let backup_one = std::fs::read(backup_path(&dir.vault(), 1)).unwrap();
+
+        let accepted = Vault::open(&dir.vault(), &secret, true).unwrap();
+        assert!(accepted.is_dirty(), "saved at the latest when it locks");
+        drop(accepted);
+        assert_eq!(std::fs::read(dir.vault()).unwrap(), on_disk);
+        assert_eq!(std::fs::read(backup_path(&dir.vault(), 1)).unwrap(), backup_one);
+    }
+
+    #[test]
+    fn the_first_save_after_opening_an_older_file_outranks_every_copy() {
+        let dir = TempDir::new("copies-accept-outrank");
+        let secret = Secret::from_str("compare me");
+        let newest = swapped(&dir, &secret, 4, 3);
+        std::fs::remove_file(anchor_path()).unwrap();
+
+        let mut accepted = Vault::open(&dir.vault(), &secret, true).unwrap();
+        let chosen = accepted.data.revision;
+        assert!(chosen < newest, "its own number is left alone until it is saved");
+        accepted.save().unwrap();
+        assert!(accepted.data.revision > newest);
+        let entries = accepted.data.entries.len();
+        drop(accepted);
+
+        let again = Vault::open(&dir.vault(), &secret, false)
+            .expect("the version the user chose is not questioned twice");
+        assert_eq!(again.data.entries.len(), entries, "and it is still that version");
+    }
+
+    #[test]
+    fn a_vault_with_nothing_to_compare_against_opens_as_before() {
+        // No backups, no mirror, no record: the first open of a moved file.
+        // Nothing new may stand in its way.
+        let dir = TempDir::new("copies-none");
+        let secret = Secret::from_str("compare me");
+        drop(small_vault(&dir.vault(), &secret));
+        for backup in list_backups(&dir.vault()) {
+            std::fs::remove_file(backup.path).unwrap();
+        }
+        std::env::set_var("DEEP_DEFENSE_TEST_MACHINE", "another computer");
+        std::fs::remove_file(anchor_path()).unwrap();
+
+        let opened = Vault::open(&dir.vault(), &secret, false).unwrap();
+        assert_eq!(opened.anchor_state(), AnchorState::FirstSeenHere);
+    }
+
+    #[test]
+    fn copies_are_compared_by_the_revision_inside_not_by_the_file_date() {
+        // A copy's timestamp is whatever the last program to touch it made
+        // it. The revision is sealed inside, where nobody without the key can
+        // change it.
+        let dir = TempDir::new("copies-dates");
+        let secret = Secret::from_str("compare me");
+        let mut vault = small_vault(&dir.vault(), &secret);
+        vault.save().unwrap();
+        vault.save().unwrap();
+        drop(vault);
+        // Make the oldest backup the most recently written file.
+        let oldest = backup_path(&dir.vault(), 2);
+        let bytes = std::fs::read(&oldest).unwrap();
+        std::fs::write(&oldest, bytes).unwrap();
+
+        let opened = Vault::open(&dir.vault(), &secret, false).unwrap();
+        assert_eq!(opened.anchor_state(), AnchorState::Verified);
     }
 }

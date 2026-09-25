@@ -31,8 +31,8 @@ pub enum Error {
     /// The VeraCrypt binary is missing or an invocation failed.
     VeraCrypt(String),
 
-    /// The vault on disk is older than the revision we last recorded.
-    Rollback { on_disk: u64, expected: u64 },
+    /// The vault on disk is older than something this computer knows about.
+    Rollback { on_disk: u64, evidence: Evidence },
 
     Config(String),
 
@@ -40,6 +40,49 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
+}
+
+/// What showed a vault file to be older than it should be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Evidence {
+    /// The record kept on this computer names a later revision.
+    Record { revision: u64 },
+    /// The record says the key this file opens under was replaced on this
+    /// computer — by a new master password or a new work factor — so the file
+    /// is a copy from before the change.
+    Superseded,
+    /// A later revision of the same vault is sitting in another file.
+    Copy { revision: u64, at: CopyAt },
+}
+
+/// Where a copy of a vault file lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyAt {
+    /// One of the numbered backups beside the vault file.
+    Backup(usize),
+    /// A file in the mirror directory: its copy of the vault, or one of that
+    /// copy's own backups.
+    Mirror(PathBuf),
+}
+
+impl fmt::Display for CopyAt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CopyAt::Backup(index) => write!(f, "backup {index} beside it"),
+            CopyAt::Mirror(path) => write!(f, "the mirror copy at {}", path.display()),
+        }
+    }
+}
+
+impl CopyAt {
+    /// Where the copy is, in the user's language.
+    pub fn localized(&self, strings: &crate::i18n::Strings) -> String {
+        use crate::i18n::fill1;
+        match self {
+            CopyAt::Backup(index) => fill1(strings.errors.copy_backup, index),
+            CopyAt::Mirror(path) => fill1(strings.errors.copy_mirror, path.display()),
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -56,12 +99,25 @@ impl fmt::Display for Error {
             Error::EntryNotFound(name) => write!(f, "No entry named \"{name}\"."),
             Error::EntryExists(name) => write!(f, "An entry named \"{name}\" already exists."),
             Error::VeraCrypt(msg) => write!(f, "VeraCrypt: {msg}"),
-            Error::Rollback { on_disk, expected } => write!(
-                f,
-                "This vault is revision {on_disk}, but revision {expected} was last seen \
-                 on this machine. An older copy may have been restored in place of the \
-                 current one. Continue only if you restored a backup on purpose."
-            ),
+            Error::Rollback { on_disk, evidence } => match evidence {
+                Evidence::Record { revision } => write!(
+                    f,
+                    "This vault is revision {on_disk}, but revision {revision} was last seen \
+                     on this machine. An older copy may have been restored in place of the \
+                     current one. Continue only if you restored a backup on purpose."
+                ),
+                Evidence::Superseded => write!(
+                    f,
+                    "This vault file is from before its key was changed on this machine \
+                     (a new master password or work factor), so it is an older copy. \
+                     Continue only if you restored it on purpose."
+                ),
+                Evidence::Copy { revision, at } => write!(
+                    f,
+                    "This vault is revision {on_disk}, but {at} holds revision {revision} \
+                     of it. An older copy may have been put in place of the current one."
+                ),
+            },
             Error::Config(msg) => write!(f, "Configuration: {msg}"),
             Error::Io { path, source } => write!(f, "{}: {source}", path.display()),
         }
@@ -113,7 +169,7 @@ impl Error {
     /// through untranslated — it comes from libraries we do not control, and a
     /// half-translated sentence reads worse than an honest English clause.
     pub fn localized(&self, strings: &crate::i18n::Strings) -> String {
-        use crate::i18n::{fill1, fill2};
+        use crate::i18n::{fill1, fill2, fill3};
         let e = &strings.errors;
         match self {
             Error::Authentication => e.authentication.to_owned(),
@@ -123,10 +179,21 @@ impl Error {
             Error::EntryNotFound(name) => fill1(e.entry_not_found, name),
             Error::EntryExists(name) => fill1(e.entry_exists, name),
             Error::VeraCrypt(msg) => fill1(e.veracrypt, msg),
-            Error::Rollback { on_disk, expected } => fill2(e.rollback, on_disk, expected),
+            Error::Rollback { on_disk, evidence } => match evidence {
+                Evidence::Record { revision } => fill2(e.rollback, on_disk, revision),
+                Evidence::Superseded => e.rollback_superseded.to_owned(),
+                Evidence::Copy { revision, at } => {
+                    fill3(e.rollback_copy, on_disk, at.localized(strings), revision)
+                }
+            },
             Error::Config(msg) => fill1(e.config, msg),
             Error::Io { path, source } => fill2(e.io, path.display(), source),
         }
+    }
+
+    /// True for the refusals that come with a question: open it anyway?
+    pub fn is_older_file(&self) -> bool {
+        matches!(self, Error::Rollback { .. })
     }
 
     /// True when retrying with different input could plausibly succeed.
@@ -156,7 +223,25 @@ mod tests {
             Error::veracrypt("the volume did not mount"),
             Error::Rollback {
                 on_disk: 7,
-                expected: 11,
+                evidence: Evidence::Record { revision: 11 },
+            },
+            Error::Rollback {
+                on_disk: 7,
+                evidence: Evidence::Superseded,
+            },
+            Error::Rollback {
+                on_disk: 7,
+                evidence: Evidence::Copy {
+                    revision: 12,
+                    at: CopyAt::Backup(2),
+                },
+            },
+            Error::Rollback {
+                on_disk: 7,
+                evidence: Evidence::Copy {
+                    revision: 12,
+                    at: CopyAt::Mirror(std::path::PathBuf::from("E:/mirror/vault.ddv")),
+                },
             },
             Error::config("the timeout is out of range"),
             Error::io(
@@ -224,10 +309,36 @@ mod tests {
 
         let rollback = Error::Rollback {
             on_disk: 7,
-            expected: 11,
+            evidence: Evidence::Record { revision: 11 },
         };
         let text = rollback.localized(&RU);
         assert!(text.contains('7') && text.contains("11"), "{text}");
+
+        // Which copy is newer is the whole point of the message: it is what
+        // the person goes and looks at.
+        for strings in [&EN, &RU] {
+            let backup = Error::Rollback {
+                on_disk: 7,
+                evidence: Evidence::Copy {
+                    revision: 12,
+                    at: CopyAt::Backup(3),
+                },
+            }
+            .localized(strings);
+            assert!(
+                backup.contains('7') && backup.contains("12") && backup.contains('3'),
+                "{backup}"
+            );
+            let mirror = Error::Rollback {
+                on_disk: 7,
+                evidence: Evidence::Copy {
+                    revision: 12,
+                    at: CopyAt::Mirror(std::path::PathBuf::from("E:/mirror/vault.ddv")),
+                },
+            }
+            .localized(strings);
+            assert!(mirror.contains("E:/mirror/vault.ddv"), "{mirror}");
+        }
 
         let io = Error::io(
             std::path::PathBuf::from("C:/vault.ddv"),
@@ -263,9 +374,24 @@ mod tests {
         assert!(!Error::crypto("the tag did not verify").is_retryable());
         assert!(!Error::Rollback {
             on_disk: 1,
-            expected: 2
+            evidence: Evidence::Record { revision: 2 },
         }
         .is_retryable());
+    }
+
+    #[test]
+    fn only_an_older_file_comes_with_the_question() {
+        // The unlock screen offers "open it anyway" for exactly these. Offering
+        // it for a wrong password would be offering to skip the password.
+        for error in one_of_each() {
+            assert_eq!(
+                error.is_older_file(),
+                matches!(error, Error::Rollback { .. }),
+                "{error:?}"
+            );
+        }
+        assert!(!Error::Authentication.is_older_file());
+        assert!(!Error::vault("not open").is_older_file());
     }
 
     #[test]

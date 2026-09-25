@@ -224,19 +224,31 @@ impl SlotFile {
             .slots
             .get(index)
             .ok_or_else(|| Error::format("slot index out of range"))?;
-        let aad = self.aad(index);
-
         let salt = slot[..SALT_LEN].to_vec();
-        let seed = &slot[SALT_LEN..SALT_LEN + SEED_LEN];
-        let ciphertext = &slot[SALT_LEN + SEED_LEN..];
-
         let master_key = crypto::derive_master_key(secret, &salt, &self.header.kdf)?;
-        let padded = crypto::open_cascade(ciphertext, &master_key, seed, &aad)?;
+        let payload = self.open_slot_with_key(index, &master_key)?;
         Ok(Opened {
-            payload: unpad(&padded)?,
+            payload,
             master_key,
             salt,
         })
+    }
+
+    /// Open a slot with a key that has already been derived.
+    ///
+    /// For comparing copies of a vault that is open: the key is the one its
+    /// slot was derived with, so a copy it opens is a copy of the same vault
+    /// under the same password — and no Argon2id pass is paid per copy.
+    pub fn open_slot_with_key(&self, index: usize, master_key: &Key) -> Result<Zeroizing<Vec<u8>>> {
+        let slot = self
+            .slots
+            .get(index)
+            .ok_or_else(|| Error::format("slot index out of range"))?;
+        let aad = self.aad(index);
+        let seed = &slot[SALT_LEN..SALT_LEN + SEED_LEN];
+        let ciphertext = &slot[SALT_LEN + SEED_LEN..];
+        let padded = crypto::open_cascade(ciphertext, master_key, seed, &aad)?;
+        unpad(&padded)
     }
 
     /// Derive a key and salt for a slot that has never been written.
@@ -464,6 +476,50 @@ mod tests {
         // Neither password opens the other slot.
         assert!(reparsed.open_slot(HIDDEN_SLOT, &decoy).is_err());
         assert!(reparsed.open_slot(PRIMARY_SLOT, &real).is_err());
+    }
+
+    #[test]
+    fn a_derived_key_opens_its_own_slot_in_another_copy_of_the_file() {
+        // What comparing a vault against its backups rests on: the key held by
+        // an open vault opens the same slot in a later copy, without Argon2id.
+        let mut file = SlotFile::new_random(header()).unwrap();
+        let secret = Secret::from_str("primary password");
+        let (key, salt) = file.prepare_slot(&secret).unwrap();
+        file.write_slot(PRIMARY_SLOT, b"first version", &key, &salt).unwrap();
+        file.write_slot(PRIMARY_SLOT, b"second version", &key, &salt).unwrap();
+
+        let copy = SlotFile::parse(&file.to_bytes()).unwrap();
+        assert_eq!(
+            copy.open_slot_with_key(PRIMARY_SLOT, &key).unwrap().as_slice(),
+            b"second version"
+        );
+        assert_eq!(
+            copy.open_slot(PRIMARY_SLOT, &secret).unwrap().payload.as_slice(),
+            b"second version",
+            "the two ways in agree"
+        );
+    }
+
+    #[test]
+    fn a_derived_key_opens_nothing_else() {
+        let mut file = SlotFile::new_random(header()).unwrap();
+        let (key, salt) = file.prepare_slot(&Secret::from_str("mine")).unwrap();
+        file.write_slot(PRIMARY_SLOT, b"mine", &key, &salt).unwrap();
+        write(&mut file, HIDDEN_SLOT, b"theirs", &Secret::from_str("theirs"));
+
+        // Not the other vault, not the same bytes moved to the other position,
+        // and not a slot of a file with a different header.
+        assert!(file.open_slot_with_key(HIDDEN_SLOT, &key).is_err());
+        let other_header = FileHeader::new(params(), MIN_SLOT_CAPACITY * 2).unwrap();
+        let mut bigger = SlotFile::new_random(other_header).unwrap();
+        bigger.write_slot(PRIMARY_SLOT, b"mine", &key, &salt).unwrap();
+        bigger.slots[PRIMARY_SLOT].truncate(file.slots[PRIMARY_SLOT].len());
+        bigger.slots[PRIMARY_SLOT].copy_from_slice(&file.slots[PRIMARY_SLOT]);
+        assert!(
+            bigger.open_slot_with_key(PRIMARY_SLOT, &key).is_err(),
+            "the header is part of what the slot is sealed to"
+        );
+        assert!(file.open_slot_with_key(SLOT_COUNT, &key).is_err(), "out of range");
     }
 
     /// The deniability claim, stated as a test: a file with a hidden vault and

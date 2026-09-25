@@ -46,7 +46,7 @@ use zeroize::Zeroize;
 use crate::clipboard::ClipboardManager;
 use crate::config::{Config, VAULT_FILENAME};
 use crate::crypto::{self, KdfParams, VaultHeader};
-use crate::errors::{Error, Result};
+use crate::errors::{CopyAt, Error, Result};
 use crate::secret::Secret;
 use crate::vault::Vault;
 use crate::veracrypt::{MountPoint, VeraCrypt};
@@ -526,24 +526,66 @@ fn create_in_container(
     }
 }
 
+/// What to do when the vault file turns out to be older than something this
+/// computer knows about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IfOlder {
+    /// Refuse, and say why. Every unlock starts here.
+    Refuse,
+    /// Open it anyway: the user put it there on purpose.
+    Open,
+    /// Put the newer copy back as the vault file first, then open that.
+    ///
+    /// Done here rather than by the caller because with a container the
+    /// copies are on a volume that is only mounted for the length of the
+    /// unlock.
+    Restore(CopyAt),
+}
+
 /// Open an existing vault, mounting the container first if one is in use.
 pub fn unlock(
     veracrypt: &VeraCrypt,
     config: &Config,
     password: &Secret,
-    allow_rollback: bool,
+    older: &IfOlder,
 ) -> Result<OpenVault> {
     if config.use_container {
-        unlock_in_container(veracrypt, config, password, allow_rollback)
+        unlock_in_container(veracrypt, config, password, older)
     } else {
-        unlock_standalone(config, password, allow_rollback)
+        unlock_standalone(config, password, older)
     }
+}
+
+/// Open the vault file itself, once whatever holds it is ready.
+fn open_vault_file(
+    path: &Path,
+    secret: &Secret,
+    config: &Config,
+    older: &IfOlder,
+) -> Result<Vault> {
+    if let IfOlder::Restore(at) = older {
+        let source = match at {
+            CopyAt::Backup(index) => crate::vault::backup_path(path, *index),
+            CopyAt::Mirror(copy) => copy.clone(),
+        };
+        let bytes = std::fs::read(&source).map_err(|e| Error::io(source.clone(), e))?;
+        // Checked to be a vault file before anything is touched, and the file
+        // it replaces becomes backup 1 — so this can be undone like any other
+        // restore.
+        crate::vault::restore_backup_bytes(path, &bytes)?;
+    }
+    Vault::open_with_mirror(
+        path,
+        secret,
+        *older == IfOlder::Open,
+        config.backup_mirror.as_deref(),
+    )
 }
 
 fn unlock_standalone(
     config: &Config,
     password: &Secret,
-    allow_rollback: bool,
+    older: &IfOlder,
 ) -> Result<OpenVault> {
     let path = &config.vault_path;
     if !path.is_file() {
@@ -553,7 +595,7 @@ fn unlock_standalone(
         )));
     }
     let secret = crypto::combine_secret(password, &config.keyfiles)?;
-    let vault = Vault::open(path, &secret, allow_rollback)?;
+    let vault = open_vault_file(path, &secret, config, older)?;
     Ok(OpenVault {
         vault,
         container: None,
@@ -564,7 +606,7 @@ fn unlock_in_container(
     veracrypt: &VeraCrypt,
     config: &Config,
     password: &Secret,
-    allow_rollback: bool,
+    older: &IfOlder,
 ) -> Result<OpenVault> {
     let container = &config.container_path;
     if !container.is_file() {
@@ -604,7 +646,7 @@ fn unlock_in_container(
         )));
     }
 
-    match Vault::open(&vault_path, &secret, allow_rollback) {
+    match open_vault_file(&vault_path, &secret, config, older) {
         Ok(vault) => Ok(OpenVault {
             vault,
             container: Some(OpenContainer {
@@ -735,14 +777,170 @@ mod tests {
         assert!(session.vault().is_none(), "locked");
 
         // Backup 1 at the moment of the call: the file before "Saved".
-        let restored = unlock(&absent, &config, &password, true).unwrap();
+        let restored = unlock(&absent, &config, &password, &IfOlder::Open).unwrap();
         assert!(restored.vault.data.find("Saved").is_none());
         drop(restored);
 
         // And the change typed before the restore survived, one step back.
         crate::vault::restore_backup(&config.vault_path, 1).unwrap();
-        let typed = unlock(&absent, &config, &password, true).unwrap();
+        let typed = unlock(&absent, &config, &password, &IfOlder::Open).unwrap();
         assert!(typed.vault.data.find("Typed").is_some());
+    }
+
+    /// A vault, saved a few times, then swapped for an older copy of itself
+    /// with the record on this computer deleted — the case the record alone
+    /// could not catch.
+    fn swapped_for_an_older_copy(tag: &str) -> (Scratch, Config, Secret, u64) {
+        let scratch = Scratch::new(tag);
+        let config = standalone_config(scratch.0.path());
+        let password = Secret::from_str("swap me");
+        let absent = VeraCrypt {
+            binary: None,
+            format_binary: None,
+        };
+        let mut open = create_vault(&absent, &config, &password, 0).unwrap();
+        for index in 0..3 {
+            open.vault
+                .add(crate::model::Entry::new(format!("Site {index}")))
+                .unwrap();
+            open.vault.save().unwrap();
+        }
+        let newest_backup = open.vault.data.revision - 1;
+        drop(open);
+
+        let older = crate::vault::backup_path(&config.vault_path, 3);
+        std::fs::copy(older, &config.vault_path).unwrap();
+        let _ = std::fs::remove_file(crate::config::app_dir().join("revision.anchor"));
+        (scratch, config, password, newest_backup)
+    }
+
+    #[test]
+    fn a_newer_copy_can_be_put_back_from_the_unlock_itself() {
+        let (_scratch, config, password, newest) = swapped_for_an_older_copy("restore-newer");
+        let absent = VeraCrypt {
+            binary: None,
+            format_binary: None,
+        };
+
+        let refused = unlock(&absent, &config, &password, &IfOlder::Refuse)
+            .err()
+            .expect("an older copy must not open quietly");
+        let Error::Rollback {
+            evidence: crate::errors::Evidence::Copy { revision, at },
+            ..
+        } = &refused
+        else {
+            panic!("expected a newer copy to be named, got {refused:?}");
+        };
+        assert_eq!(*revision, newest);
+        assert_eq!(*at, CopyAt::Backup(1));
+
+        let open = unlock(&absent, &config, &password, &IfOlder::Restore(at.clone())).unwrap();
+        assert_eq!(open.vault.data.revision, newest, "the newer copy is the vault now");
+        drop(open);
+
+        // Settled: the next plain unlock asks nothing.
+        let again = unlock(&absent, &config, &password, &IfOlder::Refuse).unwrap();
+        assert_eq!(again.vault.data.revision, newest);
+    }
+
+    #[test]
+    fn putting_the_newer_copy_back_loses_nothing() {
+        // The older file that was in its place becomes backup 1, like any
+        // other restore, in case the "older" one was the one wanted after all.
+        let (_scratch, config, password, _) = swapped_for_an_older_copy("restore-newer-undo");
+        let absent = VeraCrypt {
+            binary: None,
+            format_binary: None,
+        };
+        let older = std::fs::read(&config.vault_path).unwrap();
+        drop(
+            unlock(
+                &absent,
+                &config,
+                &password,
+                &IfOlder::Restore(CopyAt::Backup(1)),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            std::fs::read(crate::vault::backup_path(&config.vault_path, 1)).unwrap(),
+            older
+        );
+    }
+
+    #[test]
+    fn opening_the_older_copy_on_purpose_is_asked_about_once() {
+        let (_scratch, config, password, newest) = swapped_for_an_older_copy("open-older");
+        let absent = VeraCrypt {
+            binary: None,
+            format_binary: None,
+        };
+
+        let mut session = Session::new(config.clone());
+        let open = unlock(&absent, &config, &password, &IfOlder::Open).unwrap();
+        let chosen = open.vault.data.revision;
+        assert!(chosen < newest);
+        session.adopt(open);
+        // Locking saves it, and the save outranks every copy lying about.
+        session.lock().unwrap();
+
+        let again = unlock(&absent, &config, &password, &IfOlder::Refuse)
+            .expect("the version the user chose must not be questioned again");
+        assert!(again.vault.data.revision > newest);
+        assert!(
+            again.vault.data.find("Site 2").is_none(),
+            "and it is still the version they chose"
+        );
+    }
+
+    #[test]
+    fn the_mirror_is_consulted_when_the_backups_beside_the_vault_are_gone() {
+        // Everything within reach of the vault's own directory can go at once.
+        // The mirror is the copy that is not.
+        let scratch = Scratch::new("mirror-witness");
+        let mirror = scratch.0.path().join("mirror");
+        let mut config = standalone_config(scratch.0.path());
+        config.backup_mirror = Some(mirror.clone());
+        let password = Secret::from_str("mirror me");
+        let absent = VeraCrypt {
+            binary: None,
+            format_binary: None,
+        };
+
+        let mut open = create_vault(&absent, &config, &password, 0).unwrap();
+        open.vault.set_mirror(Some(mirror.clone()));
+        let early = std::fs::read(&config.vault_path).unwrap();
+        for index in 0..2 {
+            open.vault
+                .add(crate::model::Entry::new(format!("Later {index}")))
+                .unwrap();
+            open.vault.save().unwrap();
+        }
+        let newest = open.vault.data.revision;
+        drop(open);
+
+        std::fs::write(&config.vault_path, &early).unwrap();
+        for backup in crate::vault::list_backups(&config.vault_path) {
+            std::fs::remove_file(backup.path).unwrap();
+        }
+        let _ = std::fs::remove_file(crate::config::app_dir().join("revision.anchor"));
+
+        let refused = unlock(&absent, &config, &password, &IfOlder::Refuse)
+            .err()
+            .expect("the mirror still knows better");
+        let Error::Rollback {
+            evidence: crate::errors::Evidence::Copy { revision, at },
+            ..
+        } = &refused
+        else {
+            panic!("expected the mirror copy to be named, got {refused:?}");
+        };
+        assert_eq!(*revision, newest);
+        assert_eq!(*at, CopyAt::Mirror(mirror.join("vault.ddv")));
+
+        let open = unlock(&absent, &config, &password, &IfOlder::Restore(at.clone())).unwrap();
+        assert!(open.vault.data.find("Later 1").is_some());
     }
 
     #[test]
@@ -762,7 +960,7 @@ mod tests {
         assert!(config.vault_path.is_file());
         drop(open);
 
-        let reopened = unlock(&absent, &config, &password, false).unwrap();
+        let reopened = unlock(&absent, &config, &password, &IfOlder::Refuse).unwrap();
         assert!(reopened.container.is_none());
     }
 
@@ -784,7 +982,7 @@ mod tests {
             open.vault.save().unwrap();
         }
 
-        let open = unlock(&absent, &config, &password, true).unwrap();
+        let open = unlock(&absent, &config, &password, &IfOlder::Open).unwrap();
         assert_eq!(open.vault.data.find("github").unwrap().password, "s3cret");
     }
 
@@ -822,7 +1020,7 @@ mod tests {
         let config = standalone_config(scratch.0.path());
         create_vault(&absent, &config, &Secret::from_str("right"), 0).unwrap();
 
-        let err = unlock(&absent, &config, &Secret::from_str("wrong"), true)
+        let err = unlock(&absent, &config, &Secret::from_str("wrong"), &IfOlder::Open)
             .err()
             .expect("a wrong password must fail");
         assert!(matches!(err, Error::Authentication));
@@ -865,10 +1063,10 @@ mod tests {
         }
 
         assert!(matches!(
-            unlock(&absent, &config, &old, true).err().unwrap(),
+            unlock(&absent, &config, &old, &IfOlder::Open).err().unwrap(),
             Error::Authentication
         ));
-        let reopened = unlock(&absent, &config, &new, true).unwrap();
+        let reopened = unlock(&absent, &config, &new, &IfOlder::Open).unwrap();
         assert_eq!(reopened.vault.data.find("server").unwrap().password, "keep-me");
     }
 
@@ -883,7 +1081,7 @@ mod tests {
             vault_path: PathBuf::from(r"C:\definitely\not\here.ddv"),
             ..Config::default()
         };
-        let err = unlock(&absent, &config, &Secret::from_str("pw"), true)
+        let err = unlock(&absent, &config, &Secret::from_str("pw"), &IfOlder::Open)
             .err()
             .unwrap();
         assert!(err.to_string().contains("here.ddv"));

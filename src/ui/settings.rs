@@ -1573,11 +1573,15 @@ fn create_recovery_shares(app: &mut App) {
             .session
             .vault()
             .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
-        let path = vault.path.clone();
         let typed_secret = Secret::from_str(&typed);
         let secret =
             crate::crypto::combine_secret(&typed_secret, &app.session.config.keyfiles)?;
-        crate::vault::Vault::open(&path, &secret, true)?;
+        // Checked against the slot already open, not by opening the file a
+        // second time: a second open would write the rollback record and
+        // could save, all to answer a yes-or-no question.
+        if !vault.secret_opens_this_slot(&secret) {
+            return Err(crate::errors::Error::Authentication);
+        }
 
         let shares = crate::shamir::split(typed.as_bytes(), threshold, count)?;
         Ok(shares.iter().map(|s| s.to_text()).collect())

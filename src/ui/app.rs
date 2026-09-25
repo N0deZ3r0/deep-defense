@@ -7,13 +7,14 @@ use eframe::egui;
 use zeroize::Zeroizing;
 
 use crate::config::Config;
-use crate::errors::Error;
+use crate::errors::{Error, Evidence};
 use crate::generator::Policy;
-use crate::i18n::{fill1, fill2, Lang, Strings};
+use crate::i18n::{fill1, fill2, fill3, Lang, Strings};
 use crate::model::Entry;
 use crate::platform::LockWatcher;
 use crate::secret::Secret;
-use crate::session::{self, OpenVault, Session};
+use crate::session::{self, IfOlder, OpenVault, Session};
+use crate::vault::AnchorState;
 
 use super::icons::Icon;
 use super::theme::{self, Appearance, Palette};
@@ -93,6 +94,12 @@ impl Status {
         Self::new(Tone::Warning, title.into(), body.into(), false)
     }
 
+    /// Worth reading, not worth alarm: stays until dismissed, in the calm
+    /// colour.
+    pub fn note(title: impl Into<String>, body: impl Into<String>) -> Self {
+        Self::new(Tone::Info, title.into(), body.into(), false)
+    }
+
     pub fn error(strings: &Strings, err: &Error) -> Self {
         Self::new(
             Tone::Danger,
@@ -112,8 +119,8 @@ pub enum TaskOutcome {
     Unlocked(Box<OpenVault>),
     Created(Box<OpenVault>),
     Failed(Error),
-    /// The vault opened but is older than the revision we recorded.
-    RollbackDetected { on_disk: u64, expected: u64 },
+    /// The vault is older than something this computer knows about.
+    RollbackDetected { on_disk: u64, evidence: Evidence },
 }
 
 pub struct Task {
@@ -231,7 +238,11 @@ pub struct App {
     pub breach: crate::breach::Catalogue,
     pub generator_policy: Policy,
     pub generator_preview: Zeroizing<String>,
-    pub rollback_prompt: Option<(u64, u64)>,
+    /// The revision on disk, and what shows it to be behind.
+    pub rollback_prompt: Option<(u64, Evidence)>,
+    /// Set while an unlock that puts a newer copy back is running, so the
+    /// result can say what happened to the file.
+    restoring_newer: bool,
 
     /// Set when a screen wants the search box focused on the next frame.
     pub focus_search: bool,
@@ -292,6 +303,7 @@ impl App {
             generator_policy: Policy::default(),
             generator_preview: Zeroizing::new(String::new()),
             rollback_prompt: None,
+            restoring_newer: false,
             focus_search: false,
             window_theme: None,
             lock_watcher: LockWatcher::default(),
@@ -339,10 +351,11 @@ impl App {
 
     /// Run the unlock on a worker thread: two Argon2id passes plus a mount
     /// take seconds, and a frozen window looks like a crash.
-    pub fn start_unlock(&mut self, ctx: &egui::Context, allow_rollback: bool) {
+    pub fn start_unlock(&mut self, ctx: &egui::Context, older: IfOlder) {
         if self.busy() {
             return;
         }
+        self.restoring_newer = matches!(older, IfOlder::Restore(_));
         let password = Secret::from_str(&self.password_input);
         let config = self.session.config.clone();
         let veracrypt = self.session.veracrypt().clone();
@@ -350,10 +363,10 @@ impl App {
         let ctx = ctx.clone();
 
         std::thread::spawn(move || {
-            let outcome = match session::unlock(&veracrypt, &config, &password, allow_rollback) {
+            let outcome = match session::unlock(&veracrypt, &config, &password, &older) {
                 Ok(open) => TaskOutcome::Unlocked(Box::new(open)),
-                Err(Error::Rollback { on_disk, expected }) => {
-                    TaskOutcome::RollbackDetected { on_disk, expected }
+                Err(Error::Rollback { on_disk, evidence }) => {
+                    TaskOutcome::RollbackDetected { on_disk, evidence }
                 }
                 Err(e) => TaskOutcome::Failed(e),
             };
@@ -416,19 +429,13 @@ impl App {
                 self.screen = Screen::Main;
                 self.clear_inputs();
                 self.rollback_prompt = None;
-                self.status = match state {
-                    crate::vault::AnchorState::Removed => Some(Status::warn(
-                        strings.anchor.removed_title,
-                        strings.anchor.removed_body,
-                    )),
-                    crate::vault::AnchorState::Unverifiable => Some(Status::warn(
-                        strings.anchor.unverifiable,
-                        strings.anchor.unverifiable_body,
-                    )),
-                    // A first visit is announced in the settings pane; on the
-                    // way in it would greet every new computer with an alarm.
-                    crate::vault::AnchorState::Verified
-                    | crate::vault::AnchorState::FirstSeenHere => None,
+                self.status = if std::mem::take(&mut self.restoring_newer) {
+                    Some(Status::note(
+                        strings.shell.restored_newer_title,
+                        strings.shell.restored_newer_body,
+                    ))
+                } else {
+                    unlock_notice(strings, state)
                 };
             }
             TaskOutcome::Created(open) => {
@@ -451,10 +458,12 @@ impl App {
                     )
                 });
             }
-            TaskOutcome::RollbackDetected { on_disk, expected } => {
-                self.rollback_prompt = Some((on_disk, expected));
+            TaskOutcome::RollbackDetected { on_disk, evidence } => {
+                self.restoring_newer = false;
+                self.rollback_prompt = Some((on_disk, evidence));
             }
             TaskOutcome::Failed(e) => {
+                self.restoring_newer = false;
                 self.status = Some(Status::error(strings, &e));
                 if !e.is_retryable() {
                     self.password_input = Zeroizing::new(String::new());
@@ -954,42 +963,82 @@ impl App {
     }
 
     fn rollback_modal(&mut self, ui: &mut egui::Ui) {
-        let Some((on_disk, expected)) = self.rollback_prompt else {
+        let Some((on_disk, evidence)) = self.rollback_prompt.clone() else {
             return;
         };
         let palette = self.palette();
         let strings = self.strings();
         let ctx = ui.ctx().clone();
 
+        let (title, body) = match &evidence {
+            Evidence::Record { revision } => (
+                strings.shell.rollback_title,
+                fill2(strings.shell.rollback_body, on_disk, revision),
+            ),
+            Evidence::Superseded => (
+                strings.shell.superseded_title,
+                strings.shell.superseded_body.to_owned(),
+            ),
+            Evidence::Copy { revision, at } => (
+                strings.shell.newer_title,
+                fill3(strings.shell.newer_body, on_disk, at.localized(strings), revision),
+            ),
+        };
+
         egui::Modal::new(egui::Id::new("rollback")).show(&ctx, |ui| {
             ui.set_width(470.0);
-            widgets::notice(
-                ui,
-                palette,
-                palette.warning,
-                Icon::Warning,
-                strings.shell.rollback_title,
-                &fill2(strings.shell.rollback_body, on_disk, expected),
-            );
+            widgets::notice(ui, palette, palette.warning, Icon::Warning, title, &body);
             ui.add_space(theme::space::MD);
-            ui.horizontal(|ui| {
-                if widgets::primary_button(ui, palette, strings.shell.rollback_accept, true)
-                    .clicked()
-                {
-                    self.rollback_prompt = None;
-                    self.start_unlock(&ctx, true);
+            let mut choice = None;
+            ui.horizontal_wrapped(|ui| {
+                match &evidence {
+                    // Putting the newer copy back is the answer that is right
+                    // whichever story is true: if the older file was wanted,
+                    // it is backup 1 afterwards.
+                    Evidence::Copy { at, .. } => {
+                        if widgets::primary_button(ui, palette, strings.shell.restore_newer, true)
+                            .clicked()
+                        {
+                            choice = Some(IfOlder::Restore(at.clone()));
+                        }
+                        if ui.button(strings.shell.rollback_accept).clicked() {
+                            choice = Some(IfOlder::Open);
+                        }
+                    }
+                    Evidence::Record { .. } => {
+                        if widgets::primary_button(ui, palette, strings.shell.rollback_accept, true)
+                            .clicked()
+                        {
+                            choice = Some(IfOlder::Open);
+                        }
+                    }
+                    // Not the highlighted choice: a swapped file is the likelier
+                    // story, and a newer backup the better move.
+                    Evidence::Superseded => {
+                        if ui.button(strings.shell.rollback_accept).clicked() {
+                            choice = Some(IfOlder::Open);
+                        }
+                    }
                 }
                 if ui.button(strings.common.cancel).clicked() {
                     self.rollback_prompt = None;
                     self.password_input = Zeroizing::new(String::new());
                 }
             });
+            if let Some(older) = choice {
+                self.rollback_prompt = None;
+                self.start_unlock(&ctx, older);
+            }
         });
     }
 }
 
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl App {
+    /// One frame of the whole window.
+    ///
+    /// Separate from [`eframe::App::ui`] so a test can draw the real screens
+    /// without a real window: nothing here needs the frame.
+    pub fn draw(&mut self, ui: &mut egui::Ui) {
         self.poll_task();
         self.check_autolock();
         self.check_screen_lock();
@@ -1052,6 +1101,12 @@ impl eframe::App for App {
         self.rollback_modal(ui);
         self.busy_overlay(ui);
     }
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+    }
 
     /// The `glow` backend hands back its context here so a program that
     /// allocated GPU resources can release them. We allocate none — the
@@ -1059,6 +1114,32 @@ impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Never leave a decrypted volume mounted behind us.
         self.session.emergency_lock();
+    }
+}
+
+/// What to say on the way in about the rollback check, if anything.
+///
+/// Read before the vault is handed over. A missing or damaged record is what a
+/// swapped-in older file leaves behind, and a warning buried in a settings
+/// pane is one nobody opens.
+pub(crate) fn unlock_notice(strings: &Strings, state: AnchorState) -> Option<Status> {
+    match state {
+        AnchorState::Removed => Some(Status::warn(
+            strings.anchor.removed_title,
+            strings.anchor.removed_body,
+        )),
+        AnchorState::Unverifiable => Some(Status::warn(
+            strings.anchor.unverifiable,
+            strings.anchor.unverifiable_body,
+        )),
+        // Said calmly, but said. A first visit is the one open nothing could
+        // be checked against, and only the person at the keyboard knows
+        // whether it really is their first time on this computer.
+        AnchorState::FirstSeenHere => Some(Status::note(
+            strings.anchor.first_seen,
+            strings.anchor.first_seen_body,
+        )),
+        AnchorState::Verified => None,
     }
 }
 
@@ -1103,6 +1184,29 @@ mod tests {
         assert!(Status::info("Locked").auto_dismiss);
         assert!(!Status::warn("Careful", "details").auto_dismiss);
         assert!(!Status::error(&crate::i18n::EN, &Error::Authentication).auto_dismiss);
+    }
+
+    #[test]
+    fn a_note_is_calm_but_stays() {
+        let note = Status::note("First visit", "details");
+        assert!(note.tone == Tone::Info);
+        assert!(!note.auto_dismiss, "it has a body worth reading");
+    }
+
+    #[test]
+    fn only_a_checked_record_opens_in_silence() {
+        use crate::i18n::EN;
+        assert!(unlock_notice(&EN, AnchorState::Verified).is_none());
+
+        let first = unlock_notice(&EN, AnchorState::FirstSeenHere).expect("said on the way in");
+        assert!(first.tone == Tone::Info, "a new computer is not an alarm");
+        assert!(!first.auto_dismiss);
+        assert!(!first.body.is_empty());
+
+        for alarming in [AnchorState::Removed, AnchorState::Unverifiable] {
+            let status = unlock_notice(&EN, alarming).expect("said on the way in");
+            assert!(status.tone == Tone::Warning, "{alarming:?}");
+        }
     }
 
     #[test]
