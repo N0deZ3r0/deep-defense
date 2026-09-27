@@ -306,6 +306,14 @@ pub fn combine(shares: &[Share]) -> Result<Zeroizing<Vec<u8>>> {
     if first.version != VERSION {
         return Err(Error::format("these shares were made by another version"));
     }
+    // The threshold comes from the piece itself, and the checksum on a piece
+    // catches typing mistakes, not forgery. A piece claiming a threshold of
+    // zero rebuilt an empty-handed "password" of zero bytes' worth of zeros,
+    // and one claiming one handed its own bytes back as the secret. `split`
+    // never makes either.
+    if !(MIN_THRESHOLD..=MAX_SHARES).contains(&first.threshold) {
+        return Err(Error::format("these shares carry an impossible threshold"));
+    }
     let threshold = first.threshold as usize;
     let length = first.data.len();
 
@@ -363,7 +371,8 @@ pub fn combine(shares: &[Share]) -> Result<Zeroizing<Vec<u8>>> {
 /// Reads one written share. Leading labels and trailing notes are tolerated
 /// only insofar as they are not base32 — see [`parse_shares`] for pasted cards.
 pub fn parse_share(text: &str) -> Result<Share> {
-    let blob = base32_decode(text);
+    // The decoded bytes are the piece, so they are wiped like one.
+    let blob = Zeroizing::new(base32_decode(text));
     if blob.len() < HEADER_LEN + CHECKSUM_LEN + 1 {
         return Err(Error::format("that is too short to be a share"));
     }
@@ -418,6 +427,29 @@ mod tests {
     const SECRET: &[u8] = b"correct horse battery staple";
 
     // ------------------------------------------------------------- the field
+
+    /// A piece written by hand, with a correct checksum and whatever header
+    /// the test wants — what someone crafting a piece could produce.
+    fn crafted(threshold: u8, index: u8, data: &[u8]) -> Share {
+        let mut body = vec![VERSION, threshold, index];
+        body.extend_from_slice(&[7u8; SET_ID_LEN]);
+        body.extend_from_slice(data);
+        let checksum = Sha256::digest(&body);
+        body.extend_from_slice(&checksum[..CHECKSUM_LEN]);
+        parse_share(&base32_encode(&body)).expect("a well-formed piece parses")
+    }
+
+    #[test]
+    fn a_piece_claiming_an_impossible_threshold_is_refused() {
+        // Zero used to rebuild a secret of zeros; one handed a piece's own
+        // bytes back as the password.
+        for threshold in [0u8, 1, MAX_SHARES + 1, u8::MAX] {
+            let pieces = [crafted(threshold, 1, b"abc"), crafted(threshold, 2, b"def")];
+            assert!(combine(&pieces).is_err(), "threshold {threshold} was accepted");
+        }
+        let real = [crafted(2, 1, b"abc"), crafted(2, 2, b"def")];
+        assert!(combine(&real).is_ok(), "a possible threshold still combines");
+    }
 
     #[test]
     fn multiplication_matches_the_aes_field() {
