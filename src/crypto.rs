@@ -44,7 +44,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha512;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::errors::{Error, Result};
 use crate::secret::{Key, Secret};
@@ -330,16 +330,32 @@ pub fn random_bytes(dest: &mut [u8]) -> Result<()> {
     })
 }
 
+/// Argon2's working memory, wiped before it is given back.
+///
+/// The library frees its own memory without wiping it — with or without its
+/// `zeroize` feature — and the key is a hash of the last blocks of that
+/// memory. A copy of those freed pages, from the page file, a crash dump or
+/// the next allocation that reuses them, would therefore be as good as the
+/// key: no password needed. So the memory is ours, and it is wiped.
+struct ArgonMemory(Vec<argon2::Block>);
+
+impl Drop for ArgonMemory {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 /// Run Argon2id. This is the deliberately slow step — never cache its input.
 pub fn derive_master_key(secret: &Secret, salt: &[u8], params: &KdfParams) -> Result<Key> {
     params.validate()?;
     let argon_params = Params::new(params.m_cost, params.t_cost, params.p_cost, Some(KEY_LEN))
         .map_err(|e| Error::crypto(format!("invalid Argon2 parameters: {e}")))?;
+    let mut memory = ArgonMemory(vec![argon2::Block::new(); argon_params.block_count()]);
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon_params);
 
     let mut key = Key::zeroed();
     argon
-        .hash_password_into(secret.expose(), salt, key.as_mut())
+        .hash_password_into_with_memory(secret.expose(), salt, key.as_mut(), &mut memory.0)
         .map_err(|e| Error::crypto(format!("Argon2id failed: {e}")))?;
     Ok(key)
 }
@@ -363,7 +379,11 @@ pub fn combine_secret(password: &Secret, keyfiles: &[std::path::PathBuf]) -> Res
         let data = Zeroizing::new(
             std::fs::read(path).map_err(|e| Error::io(path.clone(), e))?,
         );
-        digests.push(Zeroizing::new(Sha512::digest(&data).to_vec()));
+        // The digest stands in for the keyfile, so its temporary gets the
+        // same treatment as the keyfile's bytes.
+        let mut digest = Sha512::digest(&data);
+        digests.push(Zeroizing::new(digest.to_vec()));
+        digest.as_mut_slice().zeroize();
     }
     // Sort the digests, not the paths, so the result does not depend on the
     // order the user happened to list their keyfiles in.
@@ -374,13 +394,21 @@ pub fn combine_secret(password: &Secret, keyfiles: &[std::path::PathBuf]) -> Res
         for digest in &digests {
             hasher.update(digest.as_slice());
         }
-        Zeroizing::new(hasher.finalize().to_vec())
+        let mut output = hasher.finalize();
+        let combined = Zeroizing::new(output.to_vec());
+        output.as_mut_slice().zeroize();
+        combined
     };
 
     let mut mac = <Hmac<Sha512> as MacInit>::new_from_slice(&combined)
         .map_err(|e| Error::crypto(format!("keyfile HMAC setup failed: {e}")))?;
     mac.update(password.expose());
-    Ok(Secret::new(mac.finalize().into_bytes().to_vec()))
+    // What comes out is the secret Argon2id is fed — worth as much as the
+    // password and every keyfile together — so no copy of it is left behind.
+    let mut output = mac.finalize().into_bytes();
+    let secret = Secret::new(output.to_vec());
+    output.as_mut_slice().zeroize();
+    Ok(secret)
 }
 
 pub(crate) fn subkey(master_key: &Key, seed: &[u8], info: &[u8]) -> Result<Key> {

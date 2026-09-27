@@ -16,10 +16,51 @@
 //! defence against a debugger attached as the same user, which can read the
 //! process while it runs.
 
+use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::{Mutex, OnceLock};
 
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
+
+/// The unit the operating system locks memory in.
+fn page_size() -> usize {
+    static SIZE: OnceLock<usize> = OnceLock::new();
+    *SIZE.get_or_init(|| {
+        #[cfg(windows)]
+        let size = {
+            let mut info = windows_sys::Win32::System::SystemInformation::SYSTEM_INFO::default();
+            unsafe { windows_sys::Win32::System::SystemInformation::GetSystemInfo(&mut info) };
+            info.dwPageSize as usize
+        };
+        #[cfg(unix)]
+        let size = usize::try_from(unsafe { libc_getpagesize() }).unwrap_or(0);
+        #[cfg(not(any(windows, unix)))]
+        let size = 0usize;
+        if size == 0 {
+            4096
+        } else {
+            size
+        }
+    })
+}
+
+/// How many live secrets hold each page that is locked on their behalf.
+///
+/// `VirtualLock` is not counted: a single `VirtualUnlock` releases a page
+/// however many callers locked it. Secrets are small and share pages — the
+/// master key and a password typed a moment ago can sit in the same four
+/// kilobytes — so without a count, dropping the short-lived one released the
+/// page under the long-lived one, and the master key became pageable the first
+/// time anything else was wiped.
+static LOCKED: Mutex<BTreeMap<usize, usize>> = Mutex::new(BTreeMap::new());
+
+/// The pages a region touches, as page numbers.
+fn pages_of(ptr: *const u8, len: usize) -> std::ops::RangeInclusive<usize> {
+    let page = page_size();
+    let start = ptr as usize;
+    (start / page)..=((start + (len - 1)) / page)
+}
 
 /// Ask the operating system to keep these bytes out of the page file.
 ///
@@ -27,42 +68,74 @@ use zeroize::{Zeroize, Zeroizing};
 /// starts failing, and failing to lock is not a reason to refuse to run. The
 /// zeroing in `Drop` is the guarantee; this only narrows the window in which a
 /// copy could reach the disk.
-fn lock_pages(bytes: &[u8]) {
-    if bytes.is_empty() {
+fn lock_region(ptr: *const u8, len: usize) {
+    if len == 0 {
         return;
     }
-    #[cfg(windows)]
-    unsafe {
-        let _ = windows_sys::Win32::System::Memory::VirtualLock(
-            bytes.as_ptr() as *mut core::ffi::c_void,
-            bytes.len(),
-        );
+    let page = page_size();
+    let mut held = LOCKED.lock().unwrap_or_else(|e| e.into_inner());
+    for number in pages_of(ptr, len) {
+        let count = held.entry(number).or_insert(0);
+        if *count == 0 {
+            os_lock(number * page, page);
+        }
+        *count += 1;
     }
-    #[cfg(unix)]
-    unsafe {
-        let _ = libc_mlock(bytes.as_ptr() as *const core::ffi::c_void, bytes.len());
-    }
-    #[cfg(not(any(windows, unix)))]
-    let _ = bytes;
 }
 
-fn unlock_pages(bytes: &[u8]) {
-    if bytes.is_empty() {
+/// Give back what [`lock_region`] took for the same region.
+///
+/// Called only once the bytes have been wiped: releasing first would leave the
+/// page free to be written to the page file, secret and all, in the moment
+/// between the two.
+fn unlock_region(ptr: *const u8, len: usize) {
+    if len == 0 {
         return;
     }
+    #[cfg(test)]
+    tests::SEEN_AT_UNLOCK.with(|seen| {
+        // The region is still allocated: only its pages are being released.
+        seen.borrow_mut()
+            .push(unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec());
+    });
+    let page = page_size();
+    let mut held = LOCKED.lock().unwrap_or_else(|e| e.into_inner());
+    for number in pages_of(ptr, len) {
+        let Some(count) = held.get_mut(&number) else {
+            continue;
+        };
+        *count -= 1;
+        if *count == 0 {
+            held.remove(&number);
+            os_unlock(number * page, page);
+        }
+    }
+}
+
+fn os_lock(address: usize, len: usize) {
     #[cfg(windows)]
     unsafe {
-        let _ = windows_sys::Win32::System::Memory::VirtualUnlock(
-            bytes.as_ptr() as *mut core::ffi::c_void,
-            bytes.len(),
-        );
+        let _ = windows_sys::Win32::System::Memory::VirtualLock(address as *mut core::ffi::c_void, len);
     }
     #[cfg(unix)]
     unsafe {
-        let _ = libc_munlock(bytes.as_ptr() as *const core::ffi::c_void, bytes.len());
+        let _ = libc_mlock(address as *const core::ffi::c_void, len);
     }
     #[cfg(not(any(windows, unix)))]
-    let _ = bytes;
+    let _ = (address, len);
+}
+
+fn os_unlock(address: usize, len: usize) {
+    #[cfg(windows)]
+    unsafe {
+        let _ = windows_sys::Win32::System::Memory::VirtualUnlock(address as *mut core::ffi::c_void, len);
+    }
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc_munlock(address as *const core::ffi::c_void, len);
+    }
+    #[cfg(not(any(windows, unix)))]
+    let _ = (address, len);
 }
 
 #[cfg(unix)]
@@ -71,6 +144,8 @@ extern "C" {
     fn libc_mlock(addr: *const core::ffi::c_void, len: usize) -> i32;
     #[link_name = "munlock"]
     fn libc_munlock(addr: *const core::ffi::c_void, len: usize) -> i32;
+    #[link_name = "getpagesize"]
+    fn libc_getpagesize() -> i32;
 }
 
 /// A password or key held in memory, wiped on drop.
@@ -78,7 +153,6 @@ extern "C" {
 /// It has no `Display`, no `Debug` that prints contents, and no `Serialize`,
 /// because the most common way a secret escapes is a log line or a panic
 /// message that someone added for debugging and forgot to remove.
-#[derive(Clone)]
 pub struct Secret {
     inner: Zeroizing<Vec<u8>>,
 }
@@ -88,7 +162,7 @@ impl Secret {
         let inner = Zeroizing::new(bytes);
         // The buffer never grows after this, so its address is stable and the
         // lock stays with the bytes it was taken for.
-        lock_pages(&inner);
+        lock_region(inner.as_ptr(), inner.len());
         Self { inner }
     }
 
@@ -135,11 +209,24 @@ impl Secret {
     }
 }
 
+/// Written out rather than derived: a derived clone would copy the bytes
+/// without locking them, and its drop would then release pages it never held.
+impl Clone for Secret {
+    fn clone(&self) -> Self {
+        Self::new(self.inner.to_vec())
+    }
+}
+
 impl Drop for Secret {
     fn drop(&mut self) {
-        // Unlock before `Zeroizing` wipes: the write has to land in the pages
-        // we pinned, not in whatever replaced them.
-        unlock_pages(&self.inner);
+        // Wipe, then release the pages. This used to run the other way round,
+        // on the reasoning that the write had to land in the pinned pages —
+        // but an address is the same page whether or not it is pinned, and
+        // releasing first left the secret on a page free to be written to disk
+        // until the wipe caught up.
+        let (ptr, len) = (self.inner.as_ptr(), self.inner.len());
+        self.inner.zeroize();
+        unlock_region(ptr, len);
     }
 }
 
@@ -161,20 +248,29 @@ impl Eq for Secret {}
 
 /// A 256-bit symmetric key, wiped on drop.
 pub struct Key {
-    bytes: Zeroizing<[u8; 32]>,
+    /// On the heap, so the key stays at the address that was locked however
+    /// often the `Key` itself is moved. Held inline, as it used to be, the
+    /// bytes were copied to a new place by every move — the lock covered the
+    /// stack slot of the constructor, and every earlier home kept a copy that
+    /// nothing ever wiped.
+    bytes: Box<Zeroizing<[u8; 32]>>,
 }
 
 impl Key {
-    pub fn new(bytes: [u8; 32]) -> Self {
-        let key = Self {
-            bytes: Zeroizing::new(bytes),
-        };
-        lock_pages(key.bytes.as_slice());
+    /// A key holding `bytes`. The array passed in is a copy, and is wiped
+    /// here; prefer [`Key::zeroed`] and writing through [`Key::as_mut`], which
+    /// makes no copy at all.
+    pub fn new(mut bytes: [u8; 32]) -> Self {
+        let mut key = Self::zeroed();
+        key.as_mut().copy_from_slice(&bytes);
+        bytes.zeroize();
         key
     }
 
     pub fn zeroed() -> Self {
-        Self::new([0u8; 32])
+        let bytes = Box::new(Zeroizing::new([0u8; 32]));
+        lock_region(bytes.as_ptr(), bytes.len());
+        Self { bytes }
     }
 
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -193,7 +289,11 @@ impl Key {
 
 impl Drop for Key {
     fn drop(&mut self) {
-        unlock_pages(self.bytes.as_slice());
+        // Wipe, then release: see `Secret`'s drop for why the order matters.
+        let (ptr, len) = (self.bytes.as_ptr(), self.bytes.len());
+        let bytes: &mut [u8; 32] = &mut self.bytes;
+        bytes.zeroize();
+        unlock_region(ptr, len);
     }
 }
 
@@ -205,7 +305,11 @@ impl fmt::Debug for Key {
 
 impl Clone for Key {
     fn clone(&self) -> Self {
-        Self::new(*self.bytes)
+        // Straight from one heap copy to the other, with no array on the
+        // stack in between to be left behind.
+        let mut key = Self::zeroed();
+        key.as_mut().copy_from_slice(self.as_bytes());
+        key
     }
 }
 
@@ -236,6 +340,95 @@ pub fn harden_process() {
 mod tests {
     use super::*;
 
+    thread_local! {
+        /// The bytes of each region at the moment its pages were released.
+        pub(super) static SEEN_AT_UNLOCK: std::cell::RefCell<Vec<Vec<u8>>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn seen_at_unlock() -> Vec<Vec<u8>> {
+        SEEN_AT_UNLOCK.with(|seen| std::mem::take(&mut *seen.borrow_mut()))
+    }
+
+    fn holders(page_number: usize) -> usize {
+        LOCKED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&page_number)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_secret_is_wiped_before_its_pages_are_released() {
+        // The defect this pins down: released first, the page was free to go
+        // to the page file with the password still on it.
+        seen_at_unlock();
+        drop(Secret::from_str("unmistakable"));
+        let seen = seen_at_unlock();
+        assert_eq!(seen.len(), 1, "one region, released once");
+        assert_eq!(seen[0].len(), "unmistakable".len());
+        assert!(seen[0].iter().all(|&b| b == 0), "still readable at release: {:?}", seen[0]);
+    }
+
+    #[test]
+    fn a_key_is_wiped_before_its_pages_are_released() {
+        seen_at_unlock();
+        drop(Key::new([0xA5; 32]));
+        let seen = seen_at_unlock();
+        // One for the key, and none for anything else: `new` makes no second
+        // locked copy on the way.
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0], vec![0u8; 32]);
+    }
+
+    #[test]
+    fn a_key_stays_where_it_was_locked_when_it_moves() {
+        let key = Key::new([3u8; 32]);
+        let at = key.as_bytes().as_ptr();
+        let page = at as usize / page_size();
+        let moved = vec![key];
+        let moved_again = moved.into_iter().next().unwrap();
+        assert_eq!(moved_again.as_bytes().as_ptr(), at, "moving the key moved the bytes");
+        assert!(holders(page) >= 1, "and the page it is on is still held");
+        assert_eq!(moved_again.as_bytes(), &[3u8; 32]);
+    }
+
+    #[test]
+    fn one_secret_leaving_does_not_release_its_neighbours_page() {
+        // A page of our own, inside a buffer nothing else can share, so no
+        // other test's secrets can be counted on it.
+        let page = page_size();
+        let buffer = vec![0u8; page * 3];
+        let aligned = (buffer.as_ptr() as usize).div_ceil(page) * page;
+        let number = aligned / page;
+        let (first, second) = (aligned as *const u8, (aligned + 64) as *const u8);
+
+        lock_region(first, 32);
+        lock_region(second, 32);
+        assert_eq!(holders(number), 2);
+        unlock_region(first, 32);
+        assert_eq!(holders(number), 1, "the neighbour's page was released with it");
+        unlock_region(second, 32);
+        assert_eq!(holders(number), 0);
+        seen_at_unlock();
+        drop(buffer);
+    }
+
+    #[test]
+    fn a_cloned_secret_is_locked_and_released_like_the_original() {
+        let original = Secret::from_str("cloned");
+        let copy = original.clone();
+        let page = copy.expose().as_ptr() as usize / page_size();
+        assert!(holders(page) >= 1, "the copy was never locked");
+        assert_eq!(copy, original);
+        seen_at_unlock();
+        drop(copy);
+        let seen = seen_at_unlock();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].iter().all(|&b| b == 0));
+    }
+
     #[test]
     fn a_secret_wipes_itself_on_drop() {
         let secret = Secret::from_str("master password");
@@ -251,8 +444,8 @@ mod tests {
     #[test]
     fn locking_an_empty_buffer_is_harmless() {
         // Called for zero-length secrets during setup, before anything is typed.
-        lock_pages(&[]);
-        unlock_pages(&[]);
+        lock_region(std::ptr::null(), 0);
+        unlock_region(std::ptr::null(), 0);
         let empty = Secret::empty();
         assert!(empty.is_empty());
     }
