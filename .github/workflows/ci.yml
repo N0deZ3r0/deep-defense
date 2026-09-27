@@ -61,14 +61,26 @@ jobs:
       - name: Lint
         # Warnings are errors here on purpose. A lint that only prints is read
         # once and then scrolled past for the rest of the project's life.
-        run: cargo clippy --lib --all-targets -- -D warnings
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --lib --all-targets -- -D warnings 2>&1 | tee lint.log
+          code=${PIPESTATUS[0]}
+          [ "$code" -eq 0 ] || bash tools/ci-explain.sh "Lint failed" lint.log
+          exit "$code"
 
       - name: Test
         # Debug, not release: the release profile drops the arithmetic overflow
         # checks, and one of these tests exists because a length field
         # overflowed rather than saturating. Running them fast would be running
         # a weaker version of them.
-        run: cargo test --lib
+        shell: bash
+        run: |
+          set +e
+          cargo test --lib 2>&1 | tee test.log
+          code=${PIPESTATUS[0]}
+          [ "$code" -eq 0 ] || bash tools/ci-explain.sh "A test failed" test.log
+          exit "$code"
 
       - name: Build
         run: cargo build --release
@@ -119,7 +131,13 @@ jobs:
 
       - name: Lint the drawing code
         # It only compiles with the feature on, so the job above never sees it.
-        run: cargo clippy --lib --all-targets --features ui-snapshots -- -D warnings
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --lib --all-targets --features ui-snapshots -- -D warnings 2>&1 | tee lint.log
+          code=${PIPESTATUS[0]}
+          [ "$code" -eq 0 ] || bash tools/ci-explain.sh "Lint failed" lint.log
+          exit "$code"
 
       - name: Draw
         # The real screens, drawn by egui's own test harness through wgpu on
@@ -134,27 +152,7 @@ jobs:
           set +e
           cargo test --lib --features ui-snapshots ui::snapshots -- --test-threads=1 2>&1 | tee draw.log
           code=${PIPESTATUS[0]}
-          if [ "$code" -ne 0 ]; then
-            # A job log is only shown to someone signed in to GitHub; the
-            # annotations and the summary are shown to anyone. Copy the reason
-            # there, so a red job explains itself to whoever is looking.
-            grep -E -A6 'panicked at|^error(\[|:)|^failures:$' draw.log | head -80 > why.txt
-            {
-              echo '### Why drawing failed'
-              echo
-              echo '```'
-              cat why.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            grep -E -A3 'panicked at' draw.log | head -40 | awk '
-              /panicked at/ { if (msg != "") print msg; msg = $0; next }
-              /^--$/ { next }
-              { msg = msg "%0A" $0 }
-              END { if (msg != "") print msg }
-            ' | head -8 | while IFS= read -r line; do
-              echo "::error title=A screen test failed::$line"
-            done
-          fi
+          [ "$code" -eq 0 ] || bash tools/ci-explain.sh "A screen test failed" draw.log
           exit "$code"
 
       - uses: actions/upload-artifact@v4
