@@ -7,7 +7,7 @@
 [![CI](https://github.com/N0deZ3r0/deep-defense/actions/workflows/ci.yml/badge.svg)](https://github.com/N0deZ3r0/deep-defense/actions/workflows/ci.yml)
 ![version](https://img.shields.io/badge/version-1.1.0-3b5bdb)
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-4c6ef5)
-![tests](https://img.shields.io/badge/tests-378-2f9e44)
+![tests](https://img.shields.io/badge/tests-394-2f9e44)
 ![Rust](https://img.shields.io/badge/Rust-1.98-dea584)
 ![install](https://img.shields.io/badge/install-none-2f9e44)
 
@@ -143,7 +143,7 @@ auto-lock on idle and on screen lock, and a clipboard that clears itself.
 ## How it is verified
 
 ```bash
-cargo test            # 369 tests, about four minutes
+cargo test            # 385 tests, about four minutes
 cargo build --release # or build.ps1, which also records the fingerprint
 ```
 
@@ -160,7 +160,7 @@ what it may not do is bring the process down on a length the file supplied. Arou
 two-of-two split of one byte, one piece plus every possible partner yields every
 possible secret exactly once.
 
-Nine tests beyond those 369, in `ui/snapshots.rs`, draw the real screens — the lock
+Nine tests beyond those 385, in `ui/snapshots.rs`, draw the real screens — the lock
 screen and its backups, the older-file prompt in each of its three forms, settings
 sections — with egui's own test harness, through wgpu on WARP, the software Direct3D 12
 adapter every Windows runner has. CI keeps the pictures for a person to look at, and
@@ -205,7 +205,10 @@ we decided it, and the reason is written down.
 2. **Wiping memory is not absolute.** The OS can page a buffer out before it is
    overwritten, hibernation writes all of memory to disk regardless, and a debugger
    running as the same user reads the process through. Pinning pages is best-effort and
-   the process quota is finite.
+   the process quota is finite. The text fields belong to egui: while a password field
+   is on screen it copies the text briefly every frame, and those copies are freed
+   without a wipe. Its undo history is cleared every frame for secret fields, so that
+   at least keeps nothing.
 3. **The container's volume password goes on the command line** — only if you turn the
    container on. The Windows build of VeraCrypt accepts it no other way, which is
    exactly why a random string goes there and never the master password. On Linux and
