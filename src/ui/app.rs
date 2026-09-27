@@ -158,6 +158,17 @@ pub struct Draft {
     pub fields: Vec<crate::model::CustomField>,
 }
 
+/// The fields that are secrets are wiped with the draft, as they are with the
+/// entry it came from: an abandoned edit is dropped, not saved, and must not
+/// leave the authenticator seed or the notes behind in freed memory.
+impl Drop for Draft {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.totp.zeroize();
+        self.notes.zeroize();
+    }
+}
+
 impl Draft {
     pub fn blank() -> Self {
         Self {

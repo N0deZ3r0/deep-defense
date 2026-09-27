@@ -1493,6 +1493,7 @@ fn verify_recovery_panel(
             .hint_text(strings.recovery.unlock_paste),
     );
     widgets::describe(ui, &field, strings.recovery.unlock_paste);
+    widgets::forget_edits(ui, &field);
     if field.changed() {
         // A verdict about text that has since been edited is worse than none.
         app.settings.recovery_verify_result = None;
@@ -1562,7 +1563,8 @@ fn verify_shares(app: &App, shares: &[crate::shamir::Share]) -> bool {
 
 fn create_recovery_shares(app: &mut App) {
     let strings = app.strings();
-    let typed = app.settings.recovery_password.to_string();
+    // The master password, so it is held like one.
+    let typed = Zeroizing::new(app.settings.recovery_password.to_string());
     let threshold = app.settings.recovery_threshold;
     let count = app.settings.recovery_count;
 

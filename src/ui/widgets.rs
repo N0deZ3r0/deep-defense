@@ -119,6 +119,12 @@ pub fn secret_field(
     width: f32,
     name: &str,
 ) -> Response {
+    // Room for any password a person types, taken while the buffer is still
+    // empty. A `String` that grows moves to a bigger allocation and leaves the
+    // old one behind unwiped, holding everything typed so far.
+    if value.is_empty() && value.capacity() < SECRET_CAPACITY {
+        value.reserve(SECRET_CAPACITY);
+    }
     let response = ui.add(
         egui::TextEdit::singleline(value)
             .password(!reveal)
@@ -134,7 +140,25 @@ pub fn secret_field(
             }),
     );
     describe(ui, &response, name);
+    forget_edits(ui, &response);
     response
+}
+
+/// Bytes reserved up front for a field that holds a secret.
+const SECRET_CAPACITY: usize = 256;
+
+/// Drop egui's undo history for a field that holds a secret.
+///
+/// egui keeps an undo list for every text field, as copies of its whole text
+/// — for a password field, a list of the password as it was typed, held for
+/// as long as the program runs. Cleared every frame, it never holds more than
+/// the moment. (egui still copies the text briefly each frame to decide
+/// whether to add to that list; that copy is outside this program's reach.)
+pub fn forget_edits(ui: &Ui, response: &Response) {
+    if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), response.id) {
+        state.clear_undoer();
+        state.store(ui.ctx(), response.id);
+    }
 }
 
 /// The one emphasised action on a screen.

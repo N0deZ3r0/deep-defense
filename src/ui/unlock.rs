@@ -212,6 +212,9 @@ fn recovery_panel(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: 
                 .hint_text(strings.recovery.unlock_paste),
         );
         widgets::describe(ui, &field, strings.recovery.unlock_paste);
+        // Enough pieces rebuild the master password; their undo history
+        // would be a copy of them.
+        widgets::forget_edits(ui, &field);
 
         // Counting as they paste turns "it did not work" into "you have two of
         // the three you need", which is the difference between giving up and

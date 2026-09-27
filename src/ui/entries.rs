@@ -600,17 +600,16 @@ fn password_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &
             });
         }
 
-        let password = app
-            .draft
-            .as_ref()
-            .map(|d| d.password.to_string())
-            .unwrap_or_default();
-        widgets::strength_meter(ui, palette, strings, &password);
+        // Borrowed from the draft, not copied out of it. This runs on every
+        // frame the editor is open, and a copy here was a fresh heap buffer
+        // holding the password, freed unwiped, sixty times a second.
+        let password = app.draft.as_ref().map_or("", |d| d.password.as_str());
+        widgets::strength_meter(ui, palette, strings, password);
 
         // A warning, not a refusal: the user may not be able to change that
         // site's password this minute, and blocking the save would only throw
         // away the rest of what they typed.
-        if app.breach.contains(&password) {
+        if app.breach.contains(password) {
             widgets::error_text(ui, palette, strings.breach.warning_entry);
         }
     });
@@ -619,11 +618,12 @@ fn password_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &
         app.reveal_password = !app.reveal_password;
     }
     if copy {
-        let value = app
-            .draft
-            .as_ref()
-            .map(|d| d.password.to_string())
-            .unwrap_or_default();
+        let value = Zeroizing::new(
+            app.draft
+                .as_ref()
+                .map(|d| d.password.to_string())
+                .unwrap_or_default(),
+        );
         let seconds = app.session.config.clipboard_seconds;
         let message = fill1(strings.entry.copied_password, seconds);
         copy_to_clipboard(app, &value, &message);
@@ -631,11 +631,12 @@ fn password_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &
     if autotype {
         // The password never touches the clipboard on this path; it goes
         // straight into the window the user is about to switch to.
-        let value = app
-            .draft
-            .as_ref()
-            .map(|d| d.password.to_string())
-            .unwrap_or_default();
+        let value = Zeroizing::new(
+            app.draft
+                .as_ref()
+                .map(|d| d.password.to_string())
+                .unwrap_or_default(),
+        );
         if !value.is_empty() {
             app.begin_autotype(&value);
         }
@@ -657,13 +658,14 @@ fn totp_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &Stri
         ui.add_space(theme::space::XS);
 
         if let Some(draft) = app.draft.as_mut() {
-            ui.add(
+            let response = ui.add(
                 egui::TextEdit::singleline(&mut draft.totp)
                     .password(true)
                     .desired_width(f32::INFINITY)
                     .hint_text(strings.entry.totp_placeholder)
                     .margin(egui::Margin::symmetric(9, 7)),
             );
+            widgets::forget_edits(ui, &response);
         }
 
         let parsed = app
@@ -734,7 +736,7 @@ fn totp_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &Stri
 
 /// Named values beside the password.
 fn fields_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &Strings) {
-    let mut copy: Option<String> = None;
+    let mut copy: Option<Zeroizing<String>> = None;
     let mut remove: Option<usize> = None;
     let mut add = false;
 
@@ -761,13 +763,16 @@ fn fields_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &St
                         .margin(egui::Margin::symmetric(8, 6)),
                 );
                 let value_width = (ui.available_width() - 140.0).max(70.0);
-                ui.add(
+                let value_field = ui.add(
                     egui::TextEdit::singleline(&mut field.value)
                         .password(field.secret)
                         .desired_width(value_width)
                         .hint_text(strings.entry.field_value)
                         .margin(egui::Margin::symmetric(8, 6)),
                 );
+                if field.secret {
+                    widgets::forget_edits(ui, &value_field);
+                }
                 if widgets::icon_button(
                     ui,
                     palette,
@@ -782,7 +787,7 @@ fn fields_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &St
                 if widgets::icon_button(ui, palette, Icon::Copy, strings.common.copy, false)
                     .clicked()
                 {
-                    copy = Some(field.value.clone());
+                    copy = Some(Zeroizing::new(field.value.clone()));
                 }
                 if widgets::icon_button(ui, palette, Icon::Trash, strings.common.delete, false)
                     .clicked()
@@ -1042,7 +1047,10 @@ fn history_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings:
     let Some(key) = app.selected.clone() else {
         return;
     };
-    let history: Vec<(String, String)> = app
+    // Copies, because the vault cannot stay borrowed while the rows are
+    // drawn — but copies that wipe themselves, since this runs every frame
+    // the section is open.
+    let history: Vec<(Zeroizing<String>, String)> = app
         .session
         .vault()
         .and_then(|vault| vault.data.find(&key))
@@ -1050,7 +1058,7 @@ fn history_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings:
             entry
                 .history
                 .iter()
-                .map(|h| (h.password.clone(), h.replaced_at.clone()))
+                .map(|h| (Zeroizing::new(h.password.clone()), h.replaced_at.clone()))
                 .collect()
         })
         .unwrap_or_default();
@@ -1059,7 +1067,7 @@ fn history_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings:
         return;
     }
 
-    let mut copy: Option<String> = None;
+    let mut copy: Option<Zeroizing<String>> = None;
     egui::CollapsingHeader::new(fill1(strings.entry.history_title, history.len()))
         .default_open(false)
         .show(ui, |ui| {
@@ -1068,7 +1076,7 @@ fn history_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings:
             for (password, replaced_at) in &history {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new(mask(password))
+                        egui::RichText::new(mask(password.as_str()))
                             .monospace()
                             .color(palette.text_muted),
                     );
@@ -1244,7 +1252,13 @@ fn commit_draft(app: &mut App) {
             app.status = Some(Status::success(strings.shell.saved));
             select_entry(app, &key);
         }
-        Err(e) => app.status = Some(Status::error(strings, &e)),
+        Err(e) => {
+            app.status = Some(Status::error(strings, &e));
+            // Keep what was typed. A refused save — a name already taken, a
+            // full disk — used to throw the draft away with it, and the
+            // password in it had to be typed again.
+            app.draft = Some(draft);
+        }
     }
 }
 
