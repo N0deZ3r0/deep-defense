@@ -220,6 +220,8 @@ impl SlotFile {
     }
 
     pub fn open_slot(&self, index: usize, secret: &Secret) -> Result<Opened> {
+        #[cfg(test)]
+        tests::ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
         let slot = self
             .slots
             .get(index)
@@ -319,7 +321,12 @@ impl SlotFile {
     /// failure than a slower unlock.
     pub fn open_any(&self, secret: &Secret) -> Result<(usize, Opened)> {
         let parallel = (self.header.kdf.m_cost as u64) * (SLOT_COUNT as u64) <= 1024 * 1024;
+        self.open_any_with(secret, parallel)
+    }
 
+    /// [`Self::open_any`], with the choice of strategy made by the caller so
+    /// that both can be tested at a cost a test suite can afford.
+    fn open_any_with(&self, secret: &Secret, parallel: bool) -> Result<(usize, Opened)> {
         if parallel {
             let found = std::thread::scope(|scope| {
                 let handles: Vec<_> = (0..SLOT_COUNT)
@@ -334,10 +341,17 @@ impl SlotFile {
                 return Ok(found);
             }
         } else {
+            // Every slot, every time — including after one has opened. Stopping
+            // at the first success made the decoy's unlock take one Argon2id
+            // pass and the hidden vault's two, so a stopwatch could tell which
+            // slot a password belonged to, and that a second one was in use.
+            let mut found = None;
             for index in 0..SLOT_COUNT {
-                if let Ok(opened) = self.open_slot(index, secret) {
-                    return Ok((index, opened));
-                }
+                let attempt = self.open_slot(index, secret);
+                found = found.or_else(|| attempt.ok().map(|opened| (index, opened)));
+            }
+            if let Some(found) = found {
+                return Ok(found);
             }
         }
         Err(Error::Authentication)
@@ -368,6 +382,17 @@ impl SlotFile {
             }
         }
         Ok(())
+    }
+
+    /// The raw bytes of one slot, exactly as they would be written.
+    pub(crate) fn slot_bytes(&self, index: usize) -> &[u8] {
+        &self.slots[index]
+    }
+
+    /// Put back bytes taken with [`Self::slot_bytes`], for undoing a write
+    /// that never reached the disk.
+    pub(crate) fn restore_slot_bytes(&mut self, index: usize, bytes: Vec<u8>) {
+        self.slots[index] = bytes;
     }
 
     /// Overwrite a slot with fresh noise, erasing whatever was there.
@@ -415,6 +440,57 @@ fn unpad(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// Slot openings attempted on this thread, Argon2id pass for pass.
+        pub(super) static ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn attempts_during(run: impl FnOnce()) -> usize {
+        ATTEMPTS.with(|attempts| attempts.set(0));
+        run();
+        ATTEMPTS.with(|attempts| attempts.get())
+    }
+
+    #[test]
+    fn one_at_a_time_every_password_costs_every_slot() {
+        // The time an unlock takes must not depend on which slot the password
+        // belongs to, or a stopwatch finds the hidden vault.
+        let mut file = SlotFile::new_random(header()).unwrap();
+        let decoy = Secret::from_str("the decoy");
+        let hidden = Secret::from_str("the hidden one");
+        write(&mut file, PRIMARY_SLOT, b"decoy", &decoy);
+        write(&mut file, HIDDEN_SLOT, b"hidden", &hidden);
+
+        for (secret, expected) in [(&decoy, PRIMARY_SLOT), (&hidden, HIDDEN_SLOT)] {
+            let mut opened = None;
+            let attempts = attempts_during(|| {
+                opened = Some(file.open_any_with(secret, false).unwrap().0);
+            });
+            assert_eq!(opened, Some(expected));
+            assert_eq!(attempts, SLOT_COUNT, "slot {expected} cost a different amount");
+        }
+        let wrong = attempts_during(|| {
+            assert!(file.open_any_with(&Secret::from_str("wrong"), false).is_err());
+        });
+        assert_eq!(wrong, SLOT_COUNT);
+    }
+
+    #[test]
+    fn both_strategies_open_the_same_slots() {
+        let mut file = SlotFile::new_random(header()).unwrap();
+        let decoy = Secret::from_str("the decoy");
+        let hidden = Secret::from_str("the hidden one");
+        write(&mut file, PRIMARY_SLOT, b"decoy", &decoy);
+        write(&mut file, HIDDEN_SLOT, b"hidden", &hidden);
+        for parallel in [true, false] {
+            let (slot, opened) = file.open_any_with(&hidden, parallel).unwrap();
+            assert_eq!(slot, HIDDEN_SLOT);
+            assert_eq!(opened.payload.as_slice(), b"hidden");
+            let (slot, _) = file.open_any_with(&decoy, parallel).unwrap();
+            assert_eq!(slot, PRIMARY_SLOT);
+        }
+    }
 
     fn params() -> KdfParams {
         KdfParams {
