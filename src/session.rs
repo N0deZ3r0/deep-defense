@@ -944,6 +944,38 @@ mod tests {
     }
 
     #[test]
+    fn a_restore_from_inside_that_fails_still_saves_first_and_still_locks() {
+        // Failing at the last step of putting a backup back: the change typed
+        // before it is on disk, the vault is locked, and nothing was replaced.
+        let scratch = Scratch::new("fault-restore-session");
+        let config = standalone_config(scratch.0.path());
+        let password = Secret::from_str("restore me");
+        let absent = VeraCrypt {
+            binary: None,
+            format_binary: None,
+        };
+        let mut open = create_vault(&absent, &config, &password, 0).unwrap();
+        open.vault.add(crate::model::Entry::new("Saved")).unwrap();
+        open.vault.save().unwrap();
+        let mut session = Session::new(config.clone());
+        session.adopt(open);
+        session
+            .vault_mut()
+            .unwrap()
+            .add(crate::model::Entry::new("Typed"))
+            .unwrap();
+
+        let armed = crate::vault::faults::arm("restore", "rename");
+        assert!(session.restore_backup_and_lock(1).is_err());
+        drop(armed);
+        assert!(session.vault().is_none(), "locked all the same");
+
+        let reopened = unlock(&absent, &config, &password, &IfOlder::Refuse).unwrap();
+        assert!(reopened.vault.data.find("Typed").is_some(), "saved before the restore was tried");
+        assert!(reopened.vault.data.find("Saved").is_some());
+    }
+
+    #[test]
     fn a_standalone_vault_needs_no_veracrypt_at_all() {
         // The whole point of the default mode: an absent VeraCrypt must not
         // stop anything.

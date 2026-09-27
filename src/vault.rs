@@ -274,15 +274,34 @@ fn backup_path_for(path: &Path, index: usize) -> PathBuf {
     name
 }
 
-/// Shift the numbered backups along and copy the current file to `.bak1`.
+/// Where the file about to be replaced waits to become backup 1.
+fn staging_path_for(path: &Path) -> PathBuf {
+    let mut name = path.to_path_buf();
+    let file_name = name
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "vault.ddv".into());
+    name.set_file_name(format!("{file_name}.bak-next"));
+    name
+}
+
+/// Copy the file about to be replaced beside it, under a name that is not yet
+/// a backup. It becomes backup 1 only once the replacement is in place.
+fn stage_backup(path: &Path) -> Option<PathBuf> {
+    if !path.is_file() {
+        return None;
+    }
+    let staged = staging_path_for(path);
+    std::fs::copy(path, &staged).ok()?;
+    Some(staged)
+}
+
+/// Shift the numbered backups along, and make the staged copy backup 1.
 ///
 /// Shared by the vault directory and the mirror, so a mirror is a real
 /// rotation rather than a single overwritten copy — otherwise one bad save
 /// propagated to the mirror would destroy the only off-site history.
-fn rotate_backups_at(path: &Path) {
-    if !path.is_file() {
-        return;
-    }
+fn commit_backup(path: &Path, staged: &Path) {
     let _ = std::fs::remove_file(backup_path_for(path, BACKUP_COUNT));
     for index in (1..BACKUP_COUNT).rev() {
         let from = backup_path_for(path, index);
@@ -290,7 +309,103 @@ fn rotate_backups_at(path: &Path) {
             let _ = std::fs::rename(&from, backup_path_for(path, index + 1));
         }
     }
-    let _ = std::fs::copy(path, backup_path_for(path, 1));
+    let _ = std::fs::rename(staged, backup_path_for(path, 1));
+}
+
+/// Replace the file at `path` with `bytes`, so that a failure at any step
+/// leaves the file that was there — and every numbered backup of it — exactly
+/// as it was.
+///
+/// The order is the point. The new file is written and flushed beside the old
+/// one; the old one is copied aside; the new one is renamed over it; and only
+/// then do the backups move along. The backups used to move first: a save that
+/// then failed, on a full disk for instance, had already pushed the oldest one
+/// out, and five failed autosaves in a row left five copies of the same file
+/// where the history had been.
+fn replace_file(
+    path: &Path,
+    bytes: &[u8],
+    tmp: &Path,
+    keep_backups: bool,
+    stage: &'static str,
+) -> Result<()> {
+    let result = (|| -> Result<()> {
+        fault(stage, "write")?;
+        {
+            use std::io::Write;
+            let mut file =
+                std::fs::File::create(tmp).map_err(|e| Error::io(tmp.to_path_buf(), e))?;
+            file.write_all(bytes)
+                .map_err(|e| Error::io(tmp.to_path_buf(), e))?;
+            fault(stage, "flush")?;
+            // Without this, a power cut can leave the rename committed and
+            // the contents not.
+            file.sync_all()
+                .map_err(|e| Error::io(tmp.to_path_buf(), e))?;
+        }
+        let staged = if keep_backups { stage_backup(path) } else { None };
+        let renamed =
+            fault(stage, "rename").and_then(|()| crate::platform::rename_durably(tmp, path));
+        if let Err(e) = renamed {
+            if let Some(staged) = staged {
+                let _ = std::fs::remove_file(staged);
+            }
+            return Err(e);
+        }
+        if let Some(staged) = staged {
+            commit_backup(path, &staged);
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        // Half a file is nobody's backup.
+        let _ = std::fs::remove_file(tmp);
+    }
+    result
+}
+
+/// Failure on demand, for the tests that show what each failed write leaves
+/// behind. Compiled out of the program.
+#[cfg(test)]
+pub(crate) mod faults {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ARMED: Cell<Option<(&'static str, &'static str)>> = const { Cell::new(None) };
+    }
+
+    /// Make every write on this thread fail at `stage`.`point` until the guard
+    /// is dropped.
+    pub(crate) fn arm(stage: &'static str, point: &'static str) -> Armed {
+        ARMED.with(|armed| armed.set(Some((stage, point))));
+        Armed
+    }
+
+    pub(crate) struct Armed;
+
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            ARMED.with(|armed| armed.set(None));
+        }
+    }
+
+    pub(super) fn tripped(stage: &str, point: &str) -> bool {
+        ARMED.with(|armed| armed.get() == Some((stage, point)))
+    }
+}
+
+/// A point where a test can make a write fail. Does nothing in the program.
+fn fault(stage: &'static str, point: &'static str) -> Result<()> {
+    #[cfg(test)]
+    if faults::tripped(stage, point) {
+        return Err(Error::io(
+            PathBuf::from(format!("{stage}.{point}")),
+            std::io::Error::other("injected failure"),
+        ));
+    }
+    #[cfg(not(test))]
+    let _ = (stage, point);
+    Ok(())
 }
 
 /// One of the numbered backups beside a vault file.
@@ -346,15 +461,8 @@ pub fn restore_backup(vault_path: &Path, index: usize) -> Result<()> {
 /// was intended.
 pub fn restore_backup_bytes(vault_path: &Path, bytes: &[u8]) -> Result<()> {
     SlotFile::parse(bytes)?;
-    rotate_backups_at(vault_path);
     let tmp = vault_path.with_extension("ddv.restore-tmp");
-    {
-        use std::io::Write;
-        let mut file = std::fs::File::create(&tmp).map_err(|e| Error::io(tmp.clone(), e))?;
-        file.write_all(bytes).map_err(|e| Error::io(tmp.clone(), e))?;
-        file.sync_all().map_err(|e| Error::io(tmp.clone(), e))?;
-    }
-    crate::platform::rename_durably(&tmp, vault_path)
+    replace_file(vault_path, bytes, &tmp, true, "restore")
 }
 
 /// An open vault. Build one with [`Vault::create`] or [`Vault::open`].
@@ -1055,6 +1163,24 @@ impl Vault {
     /// file: adopting slots from the old one would mean adopting its header,
     /// which is the very thing being changed.
     fn persist(&mut self) -> Result<()> {
+        // A save that fails leaves the vault in memory as it found it: the
+        // same revision and time, so the next attempt is not a number ahead
+        // of a file that was never written — and the same sealed slot, so the
+        // file in memory still matches the one on disk. Sealing happens before
+        // writing; without this, a failed password change left the slot in
+        // memory under the new key while the disk still had the old one.
+        let (revision, modified_at) = (self.data.revision, self.data.modified_at.clone());
+        let sealed = self.file.slot_bytes(self.slot).to_vec();
+        let result = self.try_persist();
+        if result.is_err() {
+            self.data.revision = revision;
+            self.data.modified_at = modified_at;
+            self.file.restore_slot_bytes(self.slot, sealed);
+        }
+        result
+    }
+
+    fn try_persist(&mut self) -> Result<()> {
         if self.data.revision < self.outrank {
             self.data.revision = self.outrank;
         }
@@ -1073,19 +1199,8 @@ impl Vault {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::io(parent.to_path_buf(), e))?;
         }
-        self.rotate_backups();
-
         let tmp = self.path.with_extension("ddv.tmp");
-        {
-            use std::io::Write;
-            let mut file =
-                std::fs::File::create(&tmp).map_err(|e| Error::io(tmp.clone(), e))?;
-            file.write_all(&blob).map_err(|e| Error::io(tmp.clone(), e))?;
-            // Without this, a power cut can leave the rename committed and
-            // the contents not.
-            file.sync_all().map_err(|e| Error::io(tmp.clone(), e))?;
-        }
-        crate::platform::rename_durably(&tmp, &self.path)?;
+        replace_file(&self.path, &blob, &tmp, true, "save")?;
 
         self.dirty = false;
         self.write_anchor();
@@ -1126,17 +1241,8 @@ impl Vault {
 
         std::fs::create_dir_all(directory)
             .map_err(|e| Error::io(directory.to_path_buf(), e))?;
-        rotate_backups_at(&target);
-
         let tmp = target.with_extension("ddv.mirror-tmp");
-        {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&tmp).map_err(|e| Error::io(tmp.clone(), e))?;
-            file.write_all(blob).map_err(|e| Error::io(tmp.clone(), e))?;
-            file.sync_all().map_err(|e| Error::io(tmp.clone(), e))?;
-        }
-        crate::platform::rename_durably(&tmp, &target)?;
-        Ok(())
+        replace_file(&target, blob, &tmp, true, "mirror")
     }
 
     // -------------------------------------------------------------- resizing
@@ -1289,11 +1395,19 @@ impl Vault {
             }
         }
 
-        self.file = fresh;
-        if let Some((key, salt)) = rekeyed {
-            self.master_key = key;
-            self.salt = salt;
-        }
+        // Kept until the new file is on disk. A rebuild that fails has changed
+        // nothing there, so it may change nothing here either: the vault in
+        // memory used to keep the new header and key while the disk kept the
+        // old, and every later save was refused as a file "replaced while
+        // open" — the user's edits with nowhere to go.
+        let previous_file = std::mem::replace(&mut self.file, fresh);
+        let previous_key = rekeyed.map(|(key, salt)| {
+            (
+                std::mem::replace(&mut self.master_key, key),
+                std::mem::replace(&mut self.salt, salt),
+            )
+        });
+        let previous_audit = self.data.audit.clone();
 
         if new_capacity != old_capacity {
             self.data.record(
@@ -1315,7 +1429,15 @@ impl Vault {
         self.dirty = true;
         // `persist`, not `save`: re-reading would pull slots sealed against
         // the old header, which no longer authenticates them.
-        self.persist()?;
+        if let Err(e) = self.persist() {
+            self.file = previous_file;
+            if let Some((key, salt)) = previous_key {
+                self.master_key = key;
+                self.salt = salt;
+            }
+            self.data.audit = previous_audit;
+            return Err(e);
+        }
         if !records.is_empty() {
             self.write_records(records);
         }
@@ -1330,10 +1452,6 @@ impl Vault {
 
     fn backup_path(&self, index: usize) -> PathBuf {
         backup_path_for(&self.path, index)
-    }
-
-    fn rotate_backups(&self) {
-        rotate_backups_at(&self.path);
     }
 
     /// Backup files that exist beside the vault, newest first.
@@ -1404,6 +1522,7 @@ impl Vault {
     /// — including a hidden vault whose password we do not have. They are
     /// therefore fixed when the file is created.
     pub fn change_master(&mut self, new_secret: &Secret) -> Result<()> {
+        let previous_audit = self.data.audit.clone();
         self.data.record(AuditAction::MasterPasswordChanged, "");
         let (new_key, new_salt) = self.file.prepare_slot(new_secret)?;
         let old_key = std::mem::replace(&mut self.master_key, new_key);
@@ -1424,9 +1543,12 @@ impl Vault {
             }
             Err(e) => {
                 // Put the working key back so the caller still holds an open
-                // vault they can retry or save under the previous password.
+                // vault they can retry or save under the previous password —
+                // and take the line out of the log, because the password did
+                // not change and the next save would otherwise say it had.
                 self.master_key = old_key;
                 self.salt = old_salt;
+                self.data.audit = previous_audit;
                 Err(e)
             }
         }
@@ -3297,5 +3419,249 @@ mod tests {
 
         let opened = Vault::open(&dir.vault(), &secret, false).unwrap();
         assert_eq!(opened.anchor_state(), AnchorState::Verified);
+    }
+
+    // ------------------------------------------------------- failed writes
+
+    /// Every file beside the vault whose name starts with the vault's:
+    /// the vault, its backups, and anything a failed write left behind.
+    fn on_disk(vault: &Path) -> Vec<(String, Vec<u8>)> {
+        let name = vault.file_name().unwrap().to_string_lossy().to_string();
+        let mut files: Vec<_> = std::fs::read_dir(vault.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with(&name))
+            })
+            .map(|path| {
+                (
+                    path.file_name().unwrap().to_string_lossy().to_string(),
+                    std::fs::read(&path).unwrap(),
+                )
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    const WRITE_STEPS: [&str; 3] = ["write", "flush", "rename"];
+
+    #[test]
+    fn a_save_that_fails_at_any_step_changes_nothing_on_disk() {
+        for step in WRITE_STEPS {
+            let dir = TempDir::new(&format!("fault-save-{step}"));
+            let secret = Secret::from_str("fail me");
+            let mut vault = small_vault(&dir.vault(), &secret);
+            for index in 0..3 {
+                vault.add(sample_entry(&format!("Saved {index}"), "pw")).unwrap();
+                vault.save().unwrap();
+            }
+            let before = on_disk(&dir.vault());
+            let revision = vault.data.revision;
+            vault.add(sample_entry("Unsaved", "pw")).unwrap();
+
+            {
+                let _armed = faults::arm("save", step);
+                assert!(vault.save().is_err(), "{step}: the failure was not reported");
+            }
+            assert_eq!(on_disk(&dir.vault()), before, "{step}: the files beside the vault moved");
+            assert_eq!(vault.data.revision, revision, "{step}: a revision nobody wrote");
+            assert!(vault.is_dirty(), "{step}: the change is no longer waiting to be saved");
+
+            // Nothing is stuck: the next save goes through and opens cleanly.
+            vault.save().unwrap();
+            drop(vault);
+            let reopened = Vault::open(&dir.vault(), &secret, false).unwrap();
+            assert!(reopened.data.find("unsaved").is_some(), "{step}");
+            assert_eq!(reopened.anchor_state(), AnchorState::Verified, "{step}");
+        }
+    }
+
+    #[test]
+    fn saves_failing_again_and_again_do_not_push_out_the_history() {
+        // A full disk and an autosave: every attempt fails, and every attempt
+        // used to move the backups along first. Five of them left five copies
+        // of the same file where the history had been.
+        let dir = TempDir::new("fault-save-history");
+        let secret = Secret::from_str("fail me");
+        let mut vault = small_vault(&dir.vault(), &secret);
+        for index in 0..BACKUP_COUNT + 1 {
+            vault.add(sample_entry(&format!("Version {index}"), "pw")).unwrap();
+            vault.save().unwrap();
+        }
+        let before = on_disk(&dir.vault());
+        let backups: Vec<_> = list_backups(&dir.vault())
+            .iter()
+            .map(|b| std::fs::read(&b.path).unwrap())
+            .collect();
+        assert_eq!(backups.len(), BACKUP_COUNT);
+        assert!(
+            backups.windows(2).all(|pair| pair[0] != pair[1]),
+            "the history starts out as five different files"
+        );
+
+        vault.add(sample_entry("Never saved", "pw")).unwrap();
+        let _armed = faults::arm("save", "write");
+        for _ in 0..BACKUP_COUNT * 2 {
+            assert!(vault.save().is_err());
+        }
+        assert_eq!(on_disk(&dir.vault()), before);
+    }
+
+    #[test]
+    fn a_restore_that_fails_at_any_step_changes_nothing_on_disk() {
+        for step in WRITE_STEPS {
+            let dir = TempDir::new(&format!("fault-restore-{step}"));
+            let secret = Secret::from_str("fail me");
+            let mut vault = small_vault(&dir.vault(), &secret);
+            for index in 0..3 {
+                vault.add(sample_entry(&format!("Saved {index}"), "pw")).unwrap();
+                vault.save().unwrap();
+            }
+            drop(vault);
+            let before = on_disk(&dir.vault());
+
+            {
+                let _armed = faults::arm("restore", step);
+                assert!(restore_backup(&dir.vault(), 2).is_err(), "{step}");
+            }
+            assert_eq!(on_disk(&dir.vault()), before, "{step}: a failed restore moved files");
+
+            // And it still works afterwards, as a restore.
+            restore_backup(&dir.vault(), 2).unwrap();
+            let older = Vault::open(&dir.vault(), &secret, true).unwrap();
+            assert!(older.data.find("saved 2").is_none(), "{step}");
+        }
+    }
+
+    #[test]
+    fn a_password_change_that_fails_leaves_the_old_password_and_no_trace() {
+        for step in WRITE_STEPS {
+            let dir = TempDir::new(&format!("fault-rekey-{step}"));
+            let old = Secret::from_str("the old password");
+            let new = Secret::from_str("the new password");
+            let mut vault = small_vault(&dir.vault(), &old);
+            vault.add(sample_entry("Bank", "keep")).unwrap();
+            vault.save().unwrap();
+            let before = on_disk(&dir.vault());
+            let log = vault.data.audit.len();
+
+            {
+                let _armed = faults::arm("save", step);
+                assert!(vault.change_master(&new).is_err(), "{step}");
+            }
+            assert_eq!(on_disk(&dir.vault()), before, "{step}");
+            assert!(vault.secret_opens_this_slot(&old), "{step}: the old key was not put back");
+            assert_eq!(
+                vault.data.audit.len(),
+                log,
+                "{step}: the log says the password changed when it did not"
+            );
+
+            // The vault in memory still saves, under the old password.
+            vault.add(sample_entry("After", "pw")).unwrap();
+            vault.save().unwrap();
+            drop(vault);
+            let reopened = Vault::open(&dir.vault(), &old, false).unwrap();
+            assert!(reopened.data.find("after").is_some(), "{step}");
+            assert!(reopened
+                .data
+                .audit
+                .iter()
+                .all(|record| record.action != AuditAction::MasterPasswordChanged));
+            assert!(matches!(
+                Vault::open(&dir.vault(), &new, false).unwrap_err(),
+                Error::Authentication
+            ));
+        }
+    }
+
+    #[test]
+    fn a_rebuild_that_fails_leaves_the_vault_as_it_was_and_still_savable() {
+        // The in-memory vault used to keep the new header and key after a
+        // failed rebuild, and every save after it was refused.
+        for step in WRITE_STEPS {
+            let dir = TempDir::new(&format!("fault-rebuild-{step}"));
+            let secret = Secret::from_str("fail me");
+            let mut vault = small_vault(&dir.vault(), &secret);
+            vault.add(sample_entry("Bank", "keep")).unwrap();
+            vault.save().unwrap();
+            let before = on_disk(&dir.vault());
+            let log = vault.data.audit.len();
+
+            {
+                let _armed = faults::arm("save", step);
+                assert!(vault
+                    .rebuild(
+                        slots::MIN_SLOT_CAPACITY * 2,
+                        stronger_params(),
+                        Some(&secret),
+                        None,
+                    )
+                    .is_err());
+            }
+            assert_eq!(on_disk(&dir.vault()), before, "{step}");
+            assert_eq!(vault.slot_capacity(), slots::MIN_SLOT_CAPACITY, "{step}");
+            assert_eq!(vault.kdf(), &params(), "{step}");
+            assert_eq!(vault.data.audit.len(), log, "{step}: a rebuild that did not happen");
+
+            vault.add(sample_entry("After", "pw")).unwrap();
+            vault.save().expect("a failed rebuild must not strand the edits");
+            drop(vault);
+            let reopened = Vault::open(&dir.vault(), &secret, false).unwrap();
+            assert!(reopened.data.find("after").is_some(), "{step}");
+            assert_eq!(reopened.kdf(), &params(), "{step}");
+        }
+    }
+
+    #[test]
+    fn a_mirror_copy_that_fails_leaves_the_mirror_as_it_was() {
+        for step in WRITE_STEPS {
+            let dir = TempDir::new(&format!("fault-mirror-{step}"));
+            let secret = Secret::from_str("fail me");
+            let mirror = dir.path.join("mirror");
+            let mut vault = small_vault(&dir.vault(), &secret);
+            vault.set_mirror(Some(mirror.clone()));
+            for index in 0..3 {
+                vault.add(sample_entry(&format!("Saved {index}"), "pw")).unwrap();
+                vault.save().unwrap();
+            }
+            let mirrored = on_disk(&mirror.join("vault.ddv"));
+
+            vault.add(sample_entry("Later", "pw")).unwrap();
+            {
+                let _armed = faults::arm("mirror", step);
+                // The vault itself saves: a mirror is never a reason to fail.
+                vault.save().unwrap();
+            }
+            assert!(vault.mirror_error().is_some(), "{step}: the failure went unmentioned");
+            assert_eq!(on_disk(&mirror.join("vault.ddv")), mirrored, "{step}");
+
+            vault.save().unwrap();
+            assert!(vault.mirror_error().is_none(), "{step}");
+            let copy = Vault::open(&mirror.join("vault.ddv"), &secret, true).unwrap();
+            assert!(copy.data.find("later").is_some(), "{step}");
+        }
+    }
+
+    #[test]
+    fn a_save_leaves_no_staging_copy_behind() {
+        let dir = TempDir::new("fault-staging");
+        let secret = Secret::from_str("fail me");
+        let mut vault = small_vault(&dir.vault(), &secret);
+        for _ in 0..3 {
+            vault.mark_dirty();
+            vault.save().unwrap();
+        }
+        let names: Vec<_> = on_disk(&dir.vault()).into_iter().map(|(name, _)| name).collect();
+        assert_eq!(
+            names,
+            ["vault.ddv", "vault.ddv.bak1", "vault.ddv.bak2", "vault.ddv.bak3"],
+            "only the vault and its numbered backups"
+        );
     }
 }
