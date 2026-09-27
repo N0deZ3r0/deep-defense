@@ -313,6 +313,53 @@ impl Clone for Key {
     }
 }
 
+/// Serialise `value` as JSON into one allocation that wipes itself.
+///
+/// `serde_json::to_vec` grows its buffer as it writes, and every time it grows
+/// the previous buffer is freed as it is — unwiped. For the vault that buffer
+/// is every password in plaintext, so each save used to leave several partial
+/// copies of the whole vault behind in freed memory. Measured first and
+/// allocated once, the buffer never moves, and the one copy there is goes when
+/// it is dropped.
+pub fn json_bytes<T: serde::Serialize + ?Sized>(
+    value: &T,
+    pretty: bool,
+) -> serde_json::Result<Zeroizing<Vec<u8>>> {
+    let length = json_len(value, pretty)?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(length));
+    if pretty {
+        serde_json::to_writer_pretty(&mut *bytes, value)?;
+    } else {
+        serde_json::to_writer(&mut *bytes, value)?;
+    }
+    Ok(bytes)
+}
+
+/// How long `value` is as JSON, without writing it anywhere.
+///
+/// For asking how big the vault is: serialising it to find out, as the
+/// free-space readout used to on every frame, made a plaintext copy of every
+/// password each time.
+pub fn json_len<T: serde::Serialize + ?Sized>(value: &T, pretty: bool) -> serde_json::Result<usize> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    if pretty {
+        serde_json::to_writer_pretty(&mut count, value)?;
+    } else {
+        serde_json::to_writer(&mut count, value)?;
+    }
+    Ok(count.0)
+}
+
 /// Wipe a `String` in place, then drop it.
 ///
 /// `String` can reallocate as it grows, and a reallocation leaves the old
@@ -427,6 +474,31 @@ mod tests {
         let seen = seen_at_unlock();
         assert_eq!(seen.len(), 1);
         assert!(seen[0].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn json_is_written_in_one_allocation_of_exactly_its_length() {
+        // One allocation, never grown: growing is what leaves copies behind.
+        #[derive(serde::Serialize)]
+        struct Sample<'a> {
+            password: &'a str,
+            notes: Vec<&'a str>,
+        }
+        let sample = Sample {
+            password: "correct horse battery staple",
+            notes: vec!["one", "two \"quoted\"", "три"],
+        };
+        for pretty in [false, true] {
+            let bytes = json_bytes(&sample, pretty).unwrap();
+            assert_eq!(bytes.len(), bytes.capacity(), "pretty = {pretty}");
+            assert_eq!(bytes.len(), json_len(&sample, pretty).unwrap());
+            let expected = if pretty {
+                serde_json::to_vec_pretty(&sample).unwrap()
+            } else {
+                serde_json::to_vec(&sample).unwrap()
+            };
+            assert_eq!(bytes.as_slice(), expected.as_slice(), "the same bytes as serde_json's own");
+        }
     }
 
     #[test]

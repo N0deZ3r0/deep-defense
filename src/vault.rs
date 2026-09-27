@@ -733,7 +733,7 @@ impl Vault {
 
     /// Room left in this slot, in bytes, for attachments and entries.
     pub fn free_capacity(&self) -> usize {
-        let used = serde_json::to_vec(&self.data).map(|v| v.len()).unwrap_or(0);
+        let used = crate::secret::json_len(&self.data, false).unwrap_or(0);
         self.file.header.max_payload().saturating_sub(used)
     }
 
@@ -1185,10 +1185,8 @@ impl Vault {
             self.data.revision = self.outrank;
         }
         self.data.bump();
-        let payload = Zeroizing::new(
-            serde_json::to_vec(&self.data)
-                .map_err(|e| Error::vault(format!("cannot serialise the vault: {e}")))?,
-        );
+        let payload = crate::secret::json_bytes(&self.data, false)
+            .map_err(|e| Error::vault(format!("cannot serialise the vault: {e}")))?;
         // Only our slot is touched; the others are copied through byte for
         // byte, including a hidden vault we have no password for.
         self.file
@@ -1300,10 +1298,8 @@ impl Vault {
         new_kdf.validate()?;
 
         let header = slots::FileHeader::new(new_kdf, new_capacity)?;
-        let payload = Zeroizing::new(
-            serde_json::to_vec(&self.data)
-                .map_err(|e| Error::vault(format!("cannot serialise the vault: {e}")))?,
-        );
+        let payload = crate::secret::json_bytes(&self.data, false)
+            .map_err(|e| Error::vault(format!("cannot serialise the vault: {e}")))?;
         if payload.len() > header.max_payload() {
             return Err(Error::format(format!(
                 "this vault holds {} bytes and would not fit in the new size",

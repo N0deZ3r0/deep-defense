@@ -32,26 +32,51 @@ pub struct ImportReport {
 /// Attachments and password history are dropped: CSV has nowhere to put them.
 /// Use the JSON export to keep everything.
 pub fn to_csv(data: &VaultData) -> Zeroizing<String> {
-    let mut out = Zeroizing::new(String::new());
-    out.push_str("name,username,password,url,notes,totp,tags\n");
-    for entry in &data.entries {
-        let row = [
-            entry.name.as_str(),
-            entry.username.as_str(),
-            entry.password.as_str(),
-            entry.url.as_str(),
-            entry.notes.as_str(),
-            entry.totp_secret.as_str(),
-            &entry.tags.join(" "),
-        ]
-        .iter()
-        .map(|field| escape_csv(field))
-        .collect::<Vec<_>>()
-        .join(",");
-        out.push_str(&row);
-        out.push('\n');
+    const HEADER: &str = "name,username,password,url,notes,totp,tags
+";
+    let tags: Vec<String> = data.entries.iter().map(|entry| entry.tags.join(" ")).collect();
+    // Room for the worst case — every character a doubled quote, every field
+    // quoted — so the text goes into one buffer that never grows. Growing it
+    // would leave each earlier, shorter copy of the passwords behind unwiped.
+    let room = HEADER.len()
+        + data
+            .entries
+            .iter()
+            .zip(&tags)
+            .map(|(entry, tags)| {
+                csv_fields(entry, tags)
+                    .iter()
+                    .map(|field| field.len() * 2 + 3)
+                    .sum::<usize>()
+                    + 1
+            })
+            .sum::<usize>();
+    let mut out = Zeroizing::new(String::with_capacity(room));
+    out.push_str(HEADER);
+    for (entry, tags) in data.entries.iter().zip(&tags) {
+        for (index, field) in csv_fields(entry, tags).iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            push_csv_field(&mut out, field);
+        }
+        out.push('
+');
     }
     out
+}
+
+/// The columns of one row, in the order of the header.
+fn csv_fields<'a>(entry: &'a Entry, tags: &'a str) -> [&'a str; 7] {
+    [
+        entry.name.as_str(),
+        entry.username.as_str(),
+        entry.password.as_str(),
+        entry.url.as_str(),
+        entry.notes.as_str(),
+        entry.totp_secret.as_str(),
+        tags,
+    ]
 }
 
 /// The vault as JSON: everything, including attachments and history.
@@ -62,16 +87,29 @@ pub fn to_json(data: &VaultData) -> Result<Zeroizing<String>> {
     let mut exported = data.clone();
     exported.machine_key = crate::model::MachineKey::default();
     exported.anchored_on.clear();
-    serde_json::to_string_pretty(&exported)
+    let mut bytes = crate::secret::json_bytes(&exported, true)
+        .map_err(|e| Error::vault(format!("cannot serialise the vault: {e}")))?;
+    // Taken out of its buffer rather than copied: the `String` is built on
+    // the same allocation, so there is still only one copy to wipe.
+    String::from_utf8(std::mem::take(&mut *bytes))
         .map(Zeroizing::new)
-        .map_err(|e| Error::vault(format!("cannot serialise the vault: {e}")))
+        .map_err(|_| Error::vault("the export came out as something other than text"))
 }
 
-fn escape_csv(field: &str) -> String {
+/// Append one field, quoted if it needs to be — straight into the output,
+/// with no copy of the field made on the way.
+fn push_csv_field(out: &mut String, field: &str) {
     if field.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", field.replace('"', "\"\""))
+        out.push('"');
+        for c in field.chars() {
+            if c == '"' {
+                out.push('"');
+            }
+            out.push(c);
+        }
+        out.push('"');
     } else {
-        field.to_owned()
+        out.push_str(field);
     }
 }
 
@@ -83,7 +121,8 @@ fn escape_csv(field: &str) -> String {
 /// exports the same fields under slightly different names and in a different
 /// order, and guessing by position corrupts data silently.
 pub fn from_csv(data: &mut VaultData, text: &str) -> Result<ImportReport> {
-    let rows = parse_csv(text);
+    let rows = Cells(parse_csv(text));
+    let rows = &rows.0;
     let Some(header) = rows.first() else {
         return Err(Error::vault("the file is empty"));
     };
@@ -151,12 +190,22 @@ pub fn from_json(data: &mut VaultData, text: &str) -> Result<ImportReport> {
     // deserialises into an empty vault. Without this check, picking the wrong
     // file would report "imported 0 entries" instead of saying it was the
     // wrong file.
-    let shape: serde_json::Value = serde_json::from_str(text)
-        .map_err(|e| Error::vault(format!("this is not a Deep Defense export ({e})")))?;
-    if !shape.get("entries").is_some_and(|e| e.is_array()) {
-        return Err(Error::vault(
-            "this is not a Deep Defense export: it has no \"entries\" list.",
-        ));
+    //
+    // Checked without building a copy of the document: parsing it into a
+    // `Value` first, as this used to, made a second plaintext copy of every
+    // password in the file and freed it unwiped. `IgnoredAny` reads past each
+    // entry without keeping any of it.
+    #[derive(serde::Deserialize)]
+    struct Shape {
+        #[allow(dead_code)]
+        entries: Vec<serde::de::IgnoredAny>,
+    }
+    if let Err(e) = serde_json::from_str::<Shape>(text) {
+        return Err(Error::vault(if e.is_data() {
+            "this is not a Deep Defense export: it has no \"entries\" list.".to_string()
+        } else {
+            format!("this is not a Deep Defense export ({e})")
+        }));
     }
 
     let incoming: VaultData = serde_json::from_str(text)
@@ -184,8 +233,11 @@ pub fn from_json(data: &mut VaultData, text: &str) -> Result<ImportReport> {
 /// codepage, and refusing them with "invalid UTF-8" would be unhelpful when
 /// the mapping is unambiguous.
 pub fn read_text_file(path: &Path) -> Result<Zeroizing<String>> {
-    let bytes = std::fs::read(path).map_err(|e| Error::io(path.to_path_buf(), e))?;
-    match String::from_utf8(bytes.clone()) {
+    // An export is every password in plaintext. Read into a buffer that wipes
+    // itself, and decoded without the extra copies this used to make on the
+    // way.
+    let bytes = Zeroizing::new(std::fs::read(path).map_err(|e| Error::io(path.to_path_buf(), e))?);
+    match std::str::from_utf8(&bytes) {
         Ok(text) => Ok(Zeroizing::new(
             text.trim_start_matches('\u{feff}').to_owned(),
         )),
@@ -214,6 +266,22 @@ const WIN1251_HIGH: [char; 64] = [
 ];
 
 /// A minimal RFC 4180 reader: quoted fields, doubled quotes, CRLF or LF.
+/// Parsed cells, wiped together when they are no longer needed. They are an
+/// export's contents — every password in it — and the import is done with
+/// them long before they would otherwise be dropped.
+struct Cells(Vec<Vec<String>>);
+
+impl Drop for Cells {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        for row in &mut self.0 {
+            for cell in row {
+                cell.zeroize();
+            }
+        }
+    }
+}
+
 fn parse_csv(text: &str) -> Vec<Vec<String>> {
     let mut rows = Vec::new();
     let mut row = Vec::new();
