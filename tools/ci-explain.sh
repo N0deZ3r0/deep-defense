@@ -8,7 +8,10 @@
 # writes its reason there explains itself to whoever is looking — including a
 # reviewer, or the author on a machine that cannot run the build.
 title=$1
-log=$2
+# Colour codes out first: CI asks cargo for colour, and a line that starts
+# with an escape sequence does not start with "error".
+log=$(mktemp)
+sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' "$2" > "$log"
 
 {
   echo "### $title"

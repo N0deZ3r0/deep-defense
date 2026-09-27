@@ -426,7 +426,7 @@ mod tests {
         // One for the key, and none for anything else: `new` makes no second
         // locked copy on the way.
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0], vec![0u8; 32]);
+        assert_eq!(seen[0], [0u8; 32]);
     }
 
     #[test]
@@ -434,7 +434,7 @@ mod tests {
         let key = Key::new([3u8; 32]);
         let at = key.as_bytes().as_ptr();
         let page = at as usize / page_size();
-        let moved = vec![key];
+        let moved = [key];
         let moved_again = moved.into_iter().next().unwrap();
         assert_eq!(moved_again.as_bytes().as_ptr(), at, "moving the key moved the bytes");
         assert!(holders(page) >= 1, "and the page it is on is still held");
