@@ -32,8 +32,7 @@ pub struct ImportReport {
 /// Attachments and password history are dropped: CSV has nowhere to put them.
 /// Use the JSON export to keep everything.
 pub fn to_csv(data: &VaultData) -> Zeroizing<String> {
-    const HEADER: &str = "name,username,password,url,notes,totp,tags
-";
+    const HEADER: &str = "name,username,password,url,notes,totp,tags\n";
     let tags: Vec<String> = data.entries.iter().map(|entry| entry.tags.join(" ")).collect();
     // Room for the worst case — every character a doubled quote, every field
     // quoted — so the text goes into one buffer that never grows. Growing it
@@ -60,8 +59,7 @@ pub fn to_csv(data: &VaultData) -> Zeroizing<String> {
             }
             push_csv_field(&mut out, field);
         }
-        out.push('
-');
+        out.push('\n');
     }
     out
 }

@@ -11,7 +11,6 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use hmac::{Hmac, KeyInit as MacInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
 
 use crate::config::{app_dir, ensure_app_dir};
 use crate::crypto::{self, KdfParams};
