@@ -50,13 +50,15 @@ impl ClipboardManager {
                 .set()
                 .exclude_from_cloud()
                 .exclude_from_history()
-                .text(text.to_owned())
+                // Borrowed, not copied: a copy here would be one more heap
+                // buffer holding the password, freed without a wipe.
+                .text(text)
                 .map_err(|e| Error::vault(format!("cannot write to the clipboard: {e}")))?;
         }
         #[cfg(not(windows))]
         {
             clipboard
-                .set_text(text.to_owned())
+                .set_text(text)
                 .map_err(|e| Error::vault(format!("cannot write to the clipboard: {e}")))?;
         }
 
@@ -112,6 +114,8 @@ impl ClipboardManager {
         // `get_text` fails when the clipboard holds a non-text format, which
         // means the user has copied something else - nothing for us to clear.
         if let Ok(current) = clipboard.get_text() {
+            // Read back, this is the password again; it is wiped like one.
+            let current = zeroize::Zeroizing::new(current);
             let current_digest: [u8; 32] = Sha256::digest(current.as_bytes()).into();
             if &current_digest == digest {
                 let _ = clipboard.clear();

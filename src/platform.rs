@@ -100,10 +100,31 @@ pub fn type_text(text: &str) -> crate::errors::Result<()> {
         }
     }
 
-    let mut events: Vec<INPUT> = Vec::with_capacity(text.len() * 2);
+    /// The keystrokes, which are the password one character at a time, wiped
+    /// however this function is left.
+    struct Keystrokes(Vec<INPUT>);
+
+    impl Drop for Keystrokes {
+        fn drop(&mut self) {
+            use zeroize::Zeroize;
+            // Every byte of every event, as `MaybeUninit` because `INPUT`
+            // has padding and a union wider than the keyboard member: bytes
+            // that were never written may not be viewed as `u8`, but they may
+            // be overwritten.
+            let bytes = unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.0.as_mut_ptr().cast::<std::mem::MaybeUninit<u8>>(),
+                    self.0.len() * std::mem::size_of::<INPUT>(),
+                )
+            };
+            bytes.zeroize();
+        }
+    }
+
+    let mut events = Keystrokes(Vec::with_capacity(text.len() * 2));
     for unit in text.encode_utf16() {
         for flags in [KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP] {
-            events.push(INPUT {
+            events.0.push(INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: INPUT_0 {
                     ki: KEYBDINPUT {
@@ -121,12 +142,12 @@ pub fn type_text(text: &str) -> crate::errors::Result<()> {
 
     let sent = unsafe {
         SendInput(
-            events.len() as u32,
-            events.as_ptr(),
+            events.0.len() as u32,
+            events.0.as_ptr(),
             size_of::<INPUT>() as i32,
         )
     };
-    if sent as usize != events.len() {
+    if sent as usize != events.0.len() {
         return Err(crate::errors::Error::format(
             "the system refused the keystrokes; another program may be blocking input",
         ));
@@ -319,7 +340,7 @@ mod tests {
         {
             let id = first.expect("Windows always has a MachineGuid");
             assert!(id.len() >= 32, "a GUID, not a fragment of one: {id}");
-            assert!(!id.contains(' '));
+            assert!(!id.contains('\0'));
         }
     }
 
