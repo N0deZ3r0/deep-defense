@@ -118,21 +118,30 @@ fn uniform_index(bound: usize) -> Result<usize> {
     }
     let bound_u32 = u32::try_from(bound)
         .map_err(|_| Error::crypto("alphabet is implausibly large"))?;
-    // The largest multiple of `bound` that fits in u32; anything at or above
-    // `limit` would land in the short final bucket, so we draw again.
-    let limit = u32::MAX - (u32::MAX % bound_u32) - (bound_u32 - 1);
+    let zone = unbiased_zone(bound_u32);
 
     let mut buffer = [0u8; 4];
     for _ in 0..1000 {
         random_bytes(&mut buffer)?;
         let value = u32::from_le_bytes(buffer);
-        if value <= limit {
+        if u64::from(value) < zone {
             return Ok((value % bound_u32) as usize);
         }
     }
     Err(Error::crypto(
         "the random number generator would not produce an unbiased value",
     ))
+}
+
+/// How many of the 2^32 values a draw can take are kept: the largest multiple
+/// of `bound` there is room for, so every index is hit by exactly as many.
+///
+/// The limit this replaced took `bound - 1` off a number that was already a
+/// multiple, and then kept one value past it: most alphabets came out with
+/// the first two characters a hair more likely than the rest.
+fn unbiased_zone(bound: u32) -> u64 {
+    const DRAWS: u64 = 1 << 32;
+    DRAWS - DRAWS % u64::from(bound)
 }
 
 /// Generate a password, optionally guaranteeing one character per class.
@@ -323,7 +332,7 @@ pub fn estimate_entropy_bits(password: &str) -> f64 {
 
     let length = password.chars().count() as f64;
     let mut bits = length * (pool as f64).log2();
-    let lowered = password.to_lowercase();
+    let lowered = Zeroizing::new(password.to_lowercase());
 
     // Penalties, each reflecting a guess an attacker makes cheaply.
     if COMMON.contains(&lowered.as_str()) {
@@ -337,7 +346,7 @@ pub fn estimate_entropy_bits(password: &str) -> f64 {
     }
 
     let distinct = {
-        let mut chars: Vec<char> = password.chars().collect();
+        let mut chars: Zeroizing<Vec<char>> = Zeroizing::new(password.chars().collect());
         chars.sort_unstable();
         chars.dedup();
         chars.len() as f64
@@ -363,7 +372,7 @@ pub fn estimate_entropy_bits(password: &str) -> f64 {
 }
 
 fn has_run_of_three(password: &str) -> bool {
-    let chars: Vec<char> = password.chars().collect();
+    let chars: Zeroizing<Vec<char>> = Zeroizing::new(password.chars().collect());
     chars.windows(3).any(|w| w[0] == w[1] && w[1] == w[2])
 }
 
@@ -382,11 +391,11 @@ fn contains_run(haystack: &str, sequence: &str, min_len: usize) -> bool {
 }
 
 fn ends_with_year(password: &str) -> bool {
-    let chars: Vec<char> = password.chars().collect();
+    let chars: Zeroizing<Vec<char>> = Zeroizing::new(password.chars().collect());
     if chars.len() < 4 {
         return false;
     }
-    let tail: String = chars[chars.len() - 4..].iter().collect();
+    let tail: Zeroizing<String> = Zeroizing::new(chars[chars.len() - 4..].iter().collect());
     if !tail.chars().all(|c| c.is_ascii_digit()) {
         return false;
     }
@@ -482,6 +491,15 @@ mod tests {
         let first = generate_password(&policy).unwrap();
         let second = generate_password(&policy).unwrap();
         assert_ne!(*first, *second);
+    }
+
+    #[test]
+    fn every_index_is_reached_by_the_same_number_of_draws() {
+        for bound in [2u32, 3, 7, 10, 26, 62, 94, 95, 7776, u32::MAX] {
+            let zone = unbiased_zone(bound);
+            assert_eq!(zone % u64::from(bound), 0, "{bound}: a bucket is short");
+            assert!(zone > (1u64 << 32) - u64::from(bound), "{bound}: a whole bucket is wasted");
+        }
     }
 
     #[test]
