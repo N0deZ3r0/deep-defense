@@ -206,7 +206,13 @@ fn percent_decode(input: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
+        // Two hex digits, checked as such: `from_str_radix` also takes a
+        // sign, so "%+1" used to decode as the byte 0x01.
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit()
+        {
             let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("");
             if let Ok(value) = u8::from_str_radix(hex, 16) {
                 out.push(value);
@@ -262,6 +268,13 @@ mod tests {
         assert_eq!(config.secret_base32, "JBSWY3DPEHPK3PXP");
         assert_eq!(config.digits, 6);
         assert_eq!(config.period, 30);
+    }
+
+    #[test]
+    fn only_two_hex_digits_make_an_escape() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("%+1"), "% 1", "a sign is not a digit");
+        assert_eq!(percent_decode("100%"), "100%");
     }
 
     #[test]
