@@ -326,11 +326,6 @@ impl Session {
 
     // ----------------------------------------------------------------- lock
 
-    /// Save pending changes, close the vault and dismount the container.
-    ///
-    /// Returns an error only if *saving* failed. A stubborn dismount is
-    /// handled by forcing it: by that point the secrets are already gone from
-    /// memory, so the volume is just a mounted drive with ciphertext on it.
     /// Replace the open vault's file with one of its backups, then lock.
     ///
     /// The order is the whole point. The backup is read first, because the
@@ -372,6 +367,11 @@ impl Session {
         restored
     }
 
+    /// Save pending changes, close the vault and dismount the container.
+    ///
+    /// Returns an error only if *saving* failed. A stubborn dismount is
+    /// handled by forcing it: by that point the secrets are already gone from
+    /// memory, so the volume is just a mounted drive with ciphertext on it.
     pub fn lock(&mut self) -> Result<()> {
         self.clipboard.clear_now();
         let Some(mut open) = self.open.take() else {
@@ -621,14 +621,6 @@ fn unlock_in_container(
     let mut meta = ContainerMeta::load(container, config.container_meta.as_ref())?;
     let (container_password, used) = meta.unwrap_password(&secret)?;
 
-    // Tidy up after an interrupted password change: now that we know which
-    // wrapping is the live one, the others are dead weight.
-    if meta.wrapped.len() > 1 {
-        let live = meta.wrapped[used].clone();
-        meta.keep_only(&live);
-        let _ = meta.save(container);
-    }
-
     let mount = veracrypt.mount(
         container,
         &container_password,
@@ -646,7 +638,10 @@ fn unlock_in_container(
         )));
     }
 
-    match open_vault_file(&vault_path, &secret, config, older) {
+    let opened = open_then_prune(&mut meta, used, container, || {
+        open_vault_file(&vault_path, &secret, config, older)
+    });
+    match opened {
         Ok(vault) => Ok(OpenVault {
             vault,
             container: Some(OpenContainer {
@@ -660,6 +655,29 @@ fn unlock_in_container(
             Err(e)
         }
     }
+}
+
+/// Open the vault, and only then retire the wrappings that proved dead.
+///
+/// Two wrappings mean a password change was interrupted, and which one opened
+/// the volume says nothing about which password the vault inside answers to:
+/// the re-key in between may or may not have happened. Pruning before the
+/// vault opened kept the wrapping for the password just typed even when the
+/// vault refused it, and deleted the one for the password the vault did take
+/// — one password for the volume, another for the vault, neither for both.
+fn open_then_prune<T>(
+    meta: &mut ContainerMeta,
+    used: usize,
+    container: &Path,
+    open: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let opened = open()?;
+    if meta.wrapped.len() > 1 {
+        let live = meta.wrapped[used].clone();
+        meta.keep_only(&live);
+        let _ = meta.save(container);
+    }
+    Ok(opened)
 }
 
 /// Change the master password for every layer in use.
@@ -746,6 +764,52 @@ mod tests {
         fn new(tag: &str) -> Self {
             Self(crate::config::test_home::TestHome::new(tag))
         }
+    }
+
+    /// A container caught between steps 1 and 3 of a password change: its
+    /// volume opens under either password, and the vault inside answers to
+    /// only one of them — which one depends on whether step 2 happened.
+    fn half_changed_container(dir: &Path) -> (PathBuf, ContainerMeta) {
+        let container = dir.join("vault.hc");
+        let (mut meta, volume) =
+            ContainerMeta::create(&Secret::from_str("old"), &params()).unwrap();
+        meta.add_wrapping(&volume, &Secret::from_str("new"), &params())
+            .unwrap();
+        meta.save(&container).unwrap();
+        (container, meta)
+    }
+
+    #[test]
+    fn a_vault_that_refuses_the_password_keeps_both_wrappings() {
+        // The re-key never happened, so the vault still wants "old". Typing
+        // "new" opens the volume and then fails on the vault — and must not
+        // take the volume away from "old" on its way out.
+        let scratch = Scratch::new("prune-refused");
+        let (container, mut meta) = half_changed_container(scratch.0.path());
+        let (_, used) = meta.unwrap_password(&Secret::from_str("new")).unwrap();
+
+        let refused: Result<()> =
+            open_then_prune(&mut meta, used, &container, || Err(Error::Authentication));
+        assert!(refused.is_err());
+        assert_eq!(meta.wrapped.len(), 2);
+        let on_disk = ContainerMeta::load(&container, None).unwrap();
+        assert!(
+            on_disk.unwrap_password(&Secret::from_str("old")).is_ok(),
+            "the password the vault still takes still opens the volume"
+        );
+    }
+
+    #[test]
+    fn a_vault_that_opens_retires_the_other_wrapping() {
+        let scratch = Scratch::new("prune-opened");
+        let (container, mut meta) = half_changed_container(scratch.0.path());
+        let (_, used) = meta.unwrap_password(&Secret::from_str("new")).unwrap();
+
+        open_then_prune(&mut meta, used, &container, || Ok(())).unwrap();
+        assert_eq!(meta.wrapped.len(), 1);
+        let on_disk = ContainerMeta::load(&container, None).unwrap();
+        assert!(on_disk.unwrap_password(&Secret::from_str("new")).is_ok());
+        assert!(on_disk.unwrap_password(&Secret::from_str("old")).is_err());
     }
 
     #[test]
