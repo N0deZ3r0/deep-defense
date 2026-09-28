@@ -571,6 +571,17 @@ impl App {
         self.show_history = false;
         self.show_generator = false;
         self.reveal_password = false;
+        self.confirm_delete = None;
+        self.leaving = None;
+        // A countdown started before the lock used to finish after it, and
+        // type the password into whatever had focus by then.
+        self.autotype = None;
+        // The pieces of the master password, and every password half-typed
+        // into the settings window: kept past the lock, they were wiped only
+        // when that window happened to be reopened — and were waiting in it,
+        // filled in, for whoever unlocked next.
+        self.show_recovery_shares = false;
+        self.settings = settings::SettingsState::new(&self.session.config);
         self.clear_inputs();
     }
 
@@ -1360,6 +1371,22 @@ mod tests {
         assert!(!draft.differs_from(None));
         draft.notes = "a note".into();
         assert!(draft.differs_from(None));
+    }
+
+    #[test]
+    fn locking_forgets_what_the_open_session_was_holding() {
+        let _home = crate::config::test_home::TestHome::new("lock-forgets");
+        let mut app = App::new(&egui::Context::default());
+        app.begin_autotype("typed after the lock");
+        app.settings.new_password = Zeroizing::new("half a new password".into());
+        app.settings.recovery_shares = vec![Zeroizing::new("a piece of the password".into())];
+        app.show_recovery_shares = true;
+
+        app.lock_now();
+        assert!(app.autotype.is_none(), "nothing is typed once the vault is locked");
+        assert!(app.settings.new_password.is_empty());
+        assert!(app.settings.recovery_shares.is_empty());
+        assert!(!app.show_recovery_shares);
     }
 
     #[test]

@@ -49,8 +49,9 @@ pub struct SettingsState {
     pub recovery_verify_open: bool,
     /// The last answer, kept so it survives the frame that produced it.
     pub recovery_verify_result: Option<bool>,
-    /// Shown once, in a window, and dropped when it closes.
-    pub recovery_shares: Vec<String>,
+    /// Shown once, in a window, and dropped when it closes. Wiped as they
+    /// go: enough of them together are the master password.
+    pub recovery_shares: Vec<Zeroizing<String>>,
     /// The backup a restore has been asked for and not yet confirmed.
     pub restoring_backup: Option<usize>,
 
@@ -1594,7 +1595,7 @@ fn create_recovery_shares(app: &mut App) {
     let threshold = app.settings.recovery_threshold;
     let count = app.settings.recovery_count;
 
-    let outcome = (|| -> crate::errors::Result<Vec<String>> {
+    let outcome = (|| -> crate::errors::Result<Vec<Zeroizing<String>>> {
         // Verify before splitting: pieces of the wrong password would look
         // perfectly valid and fail only when they were the last hope.
         let vault = app
@@ -1612,7 +1613,7 @@ fn create_recovery_shares(app: &mut App) {
         }
 
         let shares = crate::shamir::split(typed.as_bytes(), threshold, count)?;
-        Ok(shares.iter().map(|s| s.to_text()).collect())
+        Ok(shares.iter().map(|s| Zeroizing::new(s.to_text())).collect())
     })();
 
     app.settings.recovery_password = Zeroizing::new(String::new());
@@ -1685,7 +1686,7 @@ pub fn show_recovery_window(app: &mut App, ui: &mut egui::Ui) {
                             // character.
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new(share)
+                                    egui::RichText::new(share.as_str())
                                         .monospace()
                                         .size(13.0)
                                         .color(palette.text_strong),
@@ -1733,7 +1734,7 @@ fn save_recovery_shares(app: &mut App) {
 
     let threshold = app.settings.recovery_threshold;
     let total = app.settings.recovery_shares.len();
-    let mut text = String::new();
+    let mut text = Zeroizing::new(String::new());
     for (index, share) in app.settings.recovery_shares.iter().enumerate() {
         text.push_str(strings.recovery.card_heading);
         text.push('\n');
