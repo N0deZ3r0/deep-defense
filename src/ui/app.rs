@@ -205,6 +205,54 @@ impl Draft {
             .filter(|t| !t.is_empty())
             .collect()
     }
+
+    /// Custom rows as a save keeps them: the ones left blank are dropped.
+    pub fn kept_fields(&self) -> impl Iterator<Item = &crate::model::CustomField> {
+        self.fields
+            .iter()
+            .filter(|f| !f.name.trim().is_empty() || !f.value.is_empty())
+    }
+
+    /// Whether saving this would change anything.
+    ///
+    /// `entry` is the one being edited, or `None` for a new one. Compared the
+    /// way a save stores it — trimmed where the save trims — so an editor that
+    /// was only looked at never counts as holding changes.
+    pub fn differs_from(&self, entry: Option<&Entry>) -> bool {
+        let Some(entry) = entry else {
+            return !self.name.trim().is_empty()
+                || !self.username.trim().is_empty()
+                || !self.password.is_empty()
+                || !self.url.trim().is_empty()
+                || !self.notes.is_empty()
+                || !self.parsed_tags().is_empty()
+                || !self.totp.trim().is_empty()
+                || self.kept_fields().next().is_some();
+        };
+        let fields: Vec<_> = self.kept_fields().collect();
+        self.name.trim() != entry.name.trim()
+            || self.username.trim() != entry.username.trim()
+            || *self.password != entry.password
+            || self.url.trim() != entry.url.trim()
+            || self.notes != entry.notes
+            || self.totp.trim() != entry.totp_secret.trim()
+            || self.parsed_tags() != entry.tags
+            || fields.len() != entry.fields.len()
+            || fields.iter().zip(&entry.fields).any(|(now, before)| {
+                now.name != before.name || now.value != before.value || now.secret != before.secret
+            })
+    }
+}
+
+/// Where the user asked to go while the editor held unsaved changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Leave {
+    /// Open this entry instead.
+    Select(String),
+    /// Start a new entry.
+    New,
+    /// Close the editor.
+    Close,
 }
 
 pub struct App {
@@ -225,6 +273,8 @@ pub struct App {
     pub draft: Option<Draft>,
     pub reveal_password: bool,
     pub confirm_delete: Option<String>,
+    /// A move away from an editor with unsaved changes, waiting on an answer.
+    pub leaving: Option<Leave>,
 
     pub show_settings: bool,
     pub show_audit: bool,
@@ -301,6 +351,7 @@ impl App {
             draft: None,
             reveal_password: false,
             confirm_delete: None,
+            leaving: None,
             show_settings: false,
             show_audit: false,
             show_history: false,
@@ -334,9 +385,29 @@ impl App {
         self.task.is_some()
     }
 
+    /// Whether the editor holds anything that leaving it would throw away.
+    pub fn draft_is_unsaved(&self) -> bool {
+        let Some(draft) = self.draft.as_ref() else {
+            return false;
+        };
+        let entry = draft
+            .original_key
+            .as_deref()
+            .and_then(|key| self.session.vault()?.data.find(key));
+        // An entry that has gone from under the editor counts as changed:
+        // what was typed exists nowhere else.
+        if draft.original_key.is_some() && entry.is_none() {
+            return true;
+        }
+        draft.differs_from(entry)
+    }
+
     /// True while a modal is up, so background shortcuts stay inert.
     fn modal_open(&self) -> bool {
-        self.busy() || self.rollback_prompt.is_some() || self.confirm_delete.is_some()
+        self.busy()
+            || self.rollback_prompt.is_some()
+            || self.confirm_delete.is_some()
+            || self.leaving.is_some()
     }
 
     /// Forget every password buffer the UI is holding.
@@ -591,9 +662,7 @@ impl App {
 
         if self.screen == Screen::Main && ctrl {
             if n {
-                self.draft = Some(Draft::blank());
-                self.selected = None;
-                self.reveal_password = false;
+                entries::leave_editor(self, Leave::New);
             }
             if f {
                 self.focus_search = true;
@@ -603,7 +672,14 @@ impl App {
                 return;
             }
             if s {
-                self.save_vault();
+                // The hint on the Save button says Ctrl+S, so it has to do
+                // what the button does: it used to save only changes already
+                // in the vault, and leave the entry being edited unsaved.
+                if self.draft_is_unsaved() {
+                    entries::commit_draft(self);
+                } else {
+                    self.save_vault();
+                }
             }
             if g {
                 self.show_generator = true;
@@ -620,8 +696,7 @@ impl App {
             } else if self.show_history {
                 self.show_history = false;
             } else if self.draft.is_some() {
-                self.draft = None;
-                self.selected = None;
+                entries::leave_editor(self, Leave::Close);
             } else if self.status.is_some() {
                 self.status = None;
             }
@@ -1251,6 +1326,40 @@ mod tests {
         assert_eq!(*draft.password, "secret");
         assert_eq!(draft.tags, "work, dev");
         assert_eq!(draft.parsed_tags(), vec!["work", "dev"]);
+    }
+
+    #[test]
+    fn a_draft_only_looked_at_holds_no_changes() {
+        let mut entry = Entry::new("GitHub");
+        entry.username = "me@example.com".into();
+        entry.tags = vec!["work".into()];
+        entry.set_password("secret".into());
+        entry.fields.push(crate::model::CustomField {
+            name: "PIN".into(),
+            value: "1234".into(),
+            secret: true,
+        });
+
+        let mut draft = Draft::from_entry(&entry);
+        assert!(!draft.differs_from(Some(&entry)));
+        // A blank row is dropped when saved, so it is no change either.
+        draft.fields.push(crate::model::CustomField {
+            name: String::new(),
+            value: String::new(),
+            secret: false,
+        });
+        assert!(!draft.differs_from(Some(&entry)));
+
+        draft.password = Zeroizing::new("other".into());
+        assert!(draft.differs_from(Some(&entry)));
+    }
+
+    #[test]
+    fn a_new_draft_holds_changes_once_anything_is_typed() {
+        let mut draft = Draft::blank();
+        assert!(!draft.differs_from(None));
+        draft.notes = "a note".into();
+        assert!(draft.differs_from(None));
     }
 
     #[test]

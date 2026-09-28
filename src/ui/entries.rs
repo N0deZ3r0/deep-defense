@@ -9,7 +9,7 @@ use crate::i18n::{fill1, fill2, Strings};
 use crate::model::Entry;
 use crate::totp::TotpConfig;
 
-use super::app::{App, Draft, Status};
+use super::app::{App, Draft, Leave, Status};
 use super::icons::Icon;
 use super::theme::{self, Palette};
 use super::widgets;
@@ -27,12 +27,22 @@ struct Row {
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette();
-    let rows = collect_rows(app);
     let tags = app
         .session
         .vault()
         .map(|v| v.data.all_tags())
         .unwrap_or_default();
+    // Dropped once no entry carries the tag. Kept, it went on hiding every
+    // entry — and when it was the last tag, the row of chips that could have
+    // cleared it was not drawn at all.
+    if app
+        .tag_filter
+        .as_ref()
+        .is_some_and(|tag| !tags.contains(tag))
+    {
+        app.tag_filter = None;
+    }
+    let rows = collect_rows(app);
 
     egui::Panel::left("entry_list")
         .resizable(true)
@@ -55,6 +65,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .show(ui, |ui| detail_panel(app, ui));
 
     delete_modal(app, ui);
+    unsaved_modal(app, ui);
 }
 
 fn collect_rows(app: &App) -> Vec<Row> {
@@ -111,9 +122,7 @@ fn list_panel(app: &mut App, ui: &mut egui::Ui, rows: &[Row], tags: &[String]) {
             .on_hover_text("Ctrl+N")
             .clicked()
         {
-            app.draft = Some(Draft::blank());
-            app.selected = None;
-            app.reveal_password = false;
+            leave_editor(app, Leave::New);
         }
     });
 
@@ -166,7 +175,7 @@ fn list_panel(app: &mut App, ui: &mut egui::Ui, rows: &[Row], tags: &[String]) {
         });
 
     if let Some(key) = clicked {
-        select_entry(app, &key);
+        leave_editor(app, Leave::Select(key));
     }
 
     // Arrow keys move the selection, as in any list. Suppressed while a text
@@ -190,7 +199,7 @@ fn list_panel(app: &mut App, ui: &mut egui::Ui, rows: &[Row], tags: &[String]) {
                 (Some(index), false) => index.saturating_sub(1),
             };
             let key = rows[next].key.clone();
-            select_entry(app, &key);
+            leave_editor(app, Leave::Select(key));
         }
     }
 }
@@ -397,6 +406,114 @@ fn spoken_name(strings: &Strings, row: &Row) -> String {
         spoken.push_str(&row.username);
     }
     spoken
+}
+
+/// Move away from the editor, asking first if that would lose an edit.
+///
+/// Every way out goes through here — a click in the list, the arrow keys,
+/// "+", Ctrl+N and Esc. Each of them used to replace the editor outright, and
+/// whatever had been typed into it was gone without a word.
+pub(crate) fn leave_editor(app: &mut App, to: Leave) {
+    if app.leaving.is_some() {
+        return;
+    }
+    if let Leave::Select(key) = &to {
+        if app.selected.as_deref() == Some(key.as_str()) {
+            return;
+        }
+    }
+    if app.draft_is_unsaved() {
+        app.leaving = Some(to);
+    } else {
+        go(app, to);
+    }
+}
+
+fn go(app: &mut App, to: Leave) {
+    match to {
+        Leave::Select(key) => select_entry(app, &key),
+        Leave::New => {
+            app.draft = Some(Draft::blank());
+            app.selected = None;
+            app.reveal_password = false;
+        }
+        Leave::Close => {
+            app.draft = None;
+            app.selected = None;
+            app.reveal_password = false;
+        }
+    }
+}
+
+/// Save, discard, or stay: asked when leaving would lose an edit.
+fn unsaved_modal(app: &mut App, ui: &mut egui::Ui) {
+    let Some(to) = app.leaving.clone() else {
+        return;
+    };
+    let palette = app.palette();
+    let strings = app.strings();
+    let name = app
+        .draft
+        .as_ref()
+        .map(|d| d.name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| strings.entry.new_title.to_owned());
+    let can_save = app
+        .draft
+        .as_ref()
+        .is_some_and(|d| !d.name.trim().is_empty());
+
+    enum Answer {
+        Save,
+        Discard,
+        Stay,
+    }
+    let mut answer = None;
+    egui::Modal::new(egui::Id::new("unsaved")).show(ui.ctx(), |ui| {
+        ui.set_width(400.0);
+        widgets::notice(
+            ui,
+            palette,
+            palette.warning,
+            Icon::Warning,
+            strings.entry.unsaved_title,
+            &fill1(strings.entry.unsaved_body, name),
+        );
+        ui.add_space(theme::space::MD);
+        ui.horizontal(|ui| {
+            if widgets::primary_button(ui, palette, strings.common.save, can_save).clicked() {
+                answer = Some(Answer::Save);
+            }
+            if widgets::danger_button(ui, palette, strings.entry.unsaved_discard).clicked() {
+                answer = Some(Answer::Discard);
+            }
+            if ui.button(strings.entry.unsaved_keep).clicked() {
+                answer = Some(Answer::Stay);
+            }
+        });
+        if !can_save {
+            widgets::error_text(ui, palette, strings.entry.needs_name);
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            answer = Some(Answer::Stay);
+        }
+    });
+
+    match answer {
+        Some(Answer::Save) => {
+            app.leaving = None;
+            // A save that fails keeps the editor open, with the reason shown.
+            if commit_draft(app) {
+                go(app, to);
+            }
+        }
+        Some(Answer::Discard) => {
+            app.leaving = None;
+            go(app, to);
+        }
+        Some(Answer::Stay) => app.leaving = None,
+        None => {}
+    }
 }
 
 fn select_entry(app: &mut App, key: &str) {
@@ -852,8 +969,8 @@ fn attachments_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings
     let free = app.session.vault().map(|v| v.free_capacity()).unwrap_or(0);
 
     let mut add = false;
-    let mut save: Option<String> = None;
-    let mut remove: Option<String> = None;
+    let mut save: Option<usize> = None;
+    let mut remove: Option<usize> = None;
 
     widgets::card(ui, palette, |ui| {
         ui.horizontal(|ui| {
@@ -870,7 +987,7 @@ fn attachments_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings
         if listed.is_empty() {
             ui.label(theme::muted(palette, strings.attachments.none));
         }
-        for (name, size) in &listed {
+        for (index, (name, size)) in listed.iter().enumerate() {
             ui.horizontal(|ui| {
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(15.0, 15.0), egui::Sense::hover());
@@ -887,10 +1004,10 @@ fn attachments_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings
                     )
                     .clicked()
                     {
-                        remove = Some(name.clone());
+                        remove = Some(index);
                     }
                     if ui.small_button(strings.attachments.save_as).clicked() {
-                        save = Some(name.clone());
+                        save = Some(index);
                     }
                 });
             });
@@ -906,12 +1023,36 @@ fn attachments_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings
     if add {
         add_attachment(app, &key, free);
     }
-    if let Some(name) = save {
-        save_attachment(app, &key, &name);
+    if let Some(index) = save {
+        save_attachment(app, &key, index);
     }
-    if let Some(name) = remove {
-        remove_attachment(app, &key, &name);
+    if let Some(index) = remove {
+        remove_attachment(app, &key, index);
     }
+}
+
+/// `name`, or `name (2)`, `name (3)`… — the first this entry does not have.
+///
+/// Two attachments under one name could not be told apart: "Save as" always
+/// wrote out the first, and removing either removed both.
+fn unique_attachment_name(taken: &[crate::model::Attachment], name: &str) -> String {
+    let free = |candidate: &str| !taken.iter().any(|a| a.name == candidate);
+    if free(name) {
+        return name.to_string();
+    }
+    let path = std::path::Path::new(name);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| name.to_string());
+    let extension = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    (2u32..)
+        .map(|n| format!("{stem} ({n}){extension}"))
+        .find(|candidate| free(candidate.as_str()))
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn add_attachment(app: &mut App, key: &str, free: usize) {
@@ -944,42 +1085,63 @@ fn add_attachment(app: &mut App, key: &str, free: usize) {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "attachment".into());
-    let attachment = crate::model::Attachment::new(name.clone(), &bytes);
 
-    let outcome = (|| -> crate::errors::Result<()> {
-        let vault = app
-            .session
-            .vault_mut()
-            .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
-        let entry = vault
-            .data
-            .find_mut(key)
-            .ok_or_else(|| crate::errors::Error::EntryNotFound(key.to_string()))?;
-        entry.attachments.push(attachment);
-        entry.touch();
-        vault
-            .data
-            .record(crate::model::AuditAction::AttachmentAdded, &name);
-        vault.save()
-    })();
-
-    match outcome {
+    match attach(app, key, &name, &bytes) {
         Ok(()) => app.status = Some(Status::success(strings.attachments.added)),
         Err(e) => app.status = Some(Status::error(strings, &e)),
     }
 }
 
-fn save_attachment(app: &mut App, key: &str, name: &str) {
+/// Add a file to an entry and save — or, if the save fails, leave the entry
+/// as it was.
+///
+/// Left in place after a failed save, the file showed in the list as though
+/// it were stored, and it counted against the slot on every save after, so a
+/// vault it had filled refused to save anything until it was removed by hand.
+fn attach(app: &mut App, key: &str, name: &str, bytes: &[u8]) -> crate::errors::Result<()> {
+    let vault = app
+        .session
+        .vault_mut()
+        .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
+    let previous_audit = vault.data.audit.clone();
+    let entry = vault
+        .data
+        .find_mut(key)
+        .ok_or_else(|| crate::errors::Error::EntryNotFound(key.to_string()))?;
+    let previous_update = entry.updated_at.clone();
+    let previous_count = entry.attachments.len();
+    let name = unique_attachment_name(&entry.attachments, name);
+    entry
+        .attachments
+        .push(crate::model::Attachment::new(name.clone(), bytes));
+    entry.touch();
+    vault
+        .data
+        .record(crate::model::AuditAction::AttachmentAdded, &name);
+
+    let saved = vault.save();
+    if saved.is_err() {
+        if let Some(entry) = vault.data.find_mut(key) {
+            entry.attachments.truncate(previous_count);
+            entry.updated_at = previous_update;
+        }
+        vault.data.audit = previous_audit;
+    }
+    saved
+}
+
+fn save_attachment(app: &mut App, key: &str, index: usize) {
     let strings = app.strings();
-    let bytes = app
+    let found = app
         .session
         .vault()
         .and_then(|vault| vault.data.find(key))
-        .and_then(|entry| entry.attachments.iter().find(|a| a.name == name))
-        .and_then(|a| a.decode());
-    let Some(bytes) = bytes else {
+        .and_then(|entry| entry.attachments.get(index))
+        .and_then(|a| a.decode().map(|bytes| (a.name.clone(), bytes)));
+    let Some((name, bytes)) = found else {
         return;
     };
+    let name = name.as_str();
 
     let Some(path) = rfd::FileDialog::new()
         .set_title(strings.attachments.save_title)
@@ -1002,29 +1164,46 @@ fn save_attachment(app: &mut App, key: &str, name: &str) {
     }
 }
 
-fn remove_attachment(app: &mut App, key: &str, name: &str) {
+fn remove_attachment(app: &mut App, key: &str, index: usize) {
     let strings = app.strings();
-    let outcome = (|| -> crate::errors::Result<()> {
-        let vault = app
-            .session
-            .vault_mut()
-            .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
-        let entry = vault
-            .data
-            .find_mut(key)
-            .ok_or_else(|| crate::errors::Error::EntryNotFound(key.to_string()))?;
-        entry.attachments.retain(|a| a.name != name);
-        entry.touch();
-        vault
-            .data
-            .record(crate::model::AuditAction::AttachmentRemoved, name);
-        vault.save()
-    })();
-
-    match outcome {
+    match detach(app, key, index) {
         Ok(()) => app.status = Some(Status::success(strings.attachments.removed)),
         Err(e) => app.status = Some(Status::error(strings, &e)),
     }
+}
+
+/// Take one attachment off an entry and save — or, if the save fails, put it
+/// back where it was, so the list does not show a file as gone that the disk
+/// still has.
+fn detach(app: &mut App, key: &str, index: usize) -> crate::errors::Result<()> {
+    let vault = app
+        .session
+        .vault_mut()
+        .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
+    let previous_audit = vault.data.audit.clone();
+    let entry = vault
+        .data
+        .find_mut(key)
+        .ok_or_else(|| crate::errors::Error::EntryNotFound(key.to_string()))?;
+    if index >= entry.attachments.len() {
+        return Ok(());
+    }
+    let previous_update = entry.updated_at.clone();
+    let removed = entry.attachments.remove(index);
+    entry.touch();
+    vault
+        .data
+        .record(crate::model::AuditAction::AttachmentRemoved, &removed.name);
+
+    let saved = vault.save();
+    if saved.is_err() {
+        if let Some(entry) = vault.data.find_mut(key) {
+            entry.attachments.insert(index, removed);
+            entry.updated_at = previous_update;
+        }
+        vault.data.audit = previous_audit;
+    }
+    saved
 }
 
 /// Bytes as something a person reads without counting digits.
@@ -1155,15 +1334,29 @@ fn action_buttons(
     }
 }
 
-fn commit_draft(app: &mut App) {
+/// Save the entry in the editor. Returns whether it reached the disk.
+pub(crate) fn commit_draft(app: &mut App) -> bool {
     let strings = app.strings();
-    let Some(draft) = app.draft.take() else {
-        return;
+    let Some(mut draft) = app.draft.take() else {
+        return false;
     };
     let tags = draft.parsed_tags();
     let name = draft.name.trim().to_string();
+    let key = name.to_lowercase();
+    // Reachable now that Ctrl+S saves the editor: the button is greyed out
+    // for this, the shortcut is not.
+    if name.is_empty() {
+        let refusal = crate::errors::Error::vault(strings.entry.needs_name);
+        app.status = Some(Status::error(strings, &refusal));
+        app.draft = Some(draft);
+        return false;
+    }
 
-    let result = (|| -> crate::errors::Result<String> {
+    // In two steps, because a failure means something different in each. A
+    // refusal while applying — a name already taken — has changed nothing.
+    // A failure while saving — a full disk — comes after the vault in memory
+    // already holds the edit.
+    let applied = (|| -> crate::errors::Result<()> {
         let vault = app
             .session
             .vault_mut()
@@ -1171,7 +1364,15 @@ fn commit_draft(app: &mut App) {
 
         match draft.original_key.clone() {
             Some(original) => {
-                if original != name.to_lowercase() {
+                // Against the name as shown, not the key: the key ignores
+                // case, so a rename from "github" to "GitHub" was skipped and
+                // reported as saved.
+                let shown = vault
+                    .data
+                    .find(&original)
+                    .map(|entry| entry.name.clone())
+                    .ok_or_else(|| crate::errors::Error::EntryNotFound(original.clone()))?;
+                if shown != name {
                     vault.rename(&original, &name)?;
                 }
                 let entry = vault
@@ -1183,12 +1384,8 @@ fn commit_draft(app: &mut App) {
                 let totp = draft.totp.trim().to_string();
                 // Blank rows are the ones the user added and then thought
                 // better of; saving them would clutter every future edit.
-                let fields: Vec<crate::model::CustomField> = draft
-                    .fields
-                    .iter()
-                    .filter(|f| !f.name.trim().is_empty() || !f.value.is_empty())
-                    .cloned()
-                    .collect();
+                let fields: Vec<crate::model::CustomField> =
+                    draft.kept_fields().cloned().collect();
 
                 // Compared before assigning, because the log is only useful if
                 // "edited" means something changed. Opening a record and
@@ -1213,6 +1410,11 @@ fn commit_draft(app: &mut App) {
                 entry.fields = fields;
                 // Pushes the old value onto the history only if it changed.
                 let password_changed = entry.set_password(draft.password.to_string());
+                // Only for a real change, like the log line below: a save
+                // that changed nothing leaves the date alone.
+                if edited {
+                    entry.touch();
+                }
 
                 // A password change is its own line: it is the one edit worth
                 // spotting at a glance in a list of five hundred.
@@ -1233,31 +1435,44 @@ fn commit_draft(app: &mut App) {
                 entry.notes = draft.notes.clone();
                 entry.totp_secret = draft.totp.trim().to_string();
                 entry.tags = tags;
-                entry.fields = draft
-                    .fields
-                    .iter()
-                    .filter(|f| !f.name.trim().is_empty() || !f.value.is_empty())
-                    .cloned()
-                    .collect();
+                entry.fields = draft.kept_fields().cloned().collect();
                 entry.set_password(draft.password.to_string());
                 vault.add(entry)?;
             }
         }
-        vault.save()?;
-        Ok(name.to_lowercase())
+        Ok(())
     })();
 
-    match result {
-        Ok(key) => {
+    if let Err(e) = applied {
+        app.status = Some(Status::error(strings, &e));
+        // Keep what was typed: a refused save used to throw the draft away
+        // with it, and the password in it had to be typed again.
+        app.draft = Some(draft);
+        return false;
+    }
+
+    let saved = match app.session.vault_mut() {
+        Some(vault) => vault.save(),
+        None => Err(crate::errors::Error::vault("the vault is not open")),
+    };
+    match saved {
+        Ok(()) => {
             app.status = Some(Status::success(strings.shell.saved));
             select_entry(app, &key);
+            true
         }
         Err(e) => {
             app.status = Some(Status::error(strings, &e));
-            // Keep what was typed. A refused save — a name already taken, a
-            // full disk — used to throw the draft away with it, and the
-            // password in it had to be typed again.
+            // The vault in memory has the edit and stays marked unsaved, so
+            // the next save — or the lock — writes it. The editor now points
+            // at the entry as it is there. Left pointing at the old name, or
+            // still offered as new, a second Save was refused as "no such
+            // entry" or "already exists", and nothing on this screen could
+            // save it any more.
+            draft.original_key = Some(key.clone());
+            app.selected = Some(key);
             app.draft = Some(draft);
+            false
         }
     }
 }
@@ -1533,6 +1748,153 @@ mod tests {
             });
             assert!(named, "{} is not announced by name", row.name);
         }
+    }
+
+    // ---------------------------------------------------------- the editor
+
+    use super::super::app::Screen;
+    use crate::config::test_home::TestHome;
+    use crate::secret::Secret;
+    use crate::session::OpenVault;
+    use crate::vault::Vault;
+
+    /// An app on the main screen, holding a small vault with one entry.
+    fn open_app(home: &TestHome) -> App {
+        let path = home.join("vault.ddv");
+        let params = crate::crypto::KdfParams {
+            m_cost: crate::crypto::KdfParams::MIN_M_COST,
+            t_cost: 2,
+            p_cost: 1,
+            algorithm: "argon2id".into(),
+        };
+        let mut vault = Vault::create_in_slot(
+            &path,
+            &Secret::from_str("editor"),
+            params,
+            crate::slots::PRIMARY_SLOT,
+            Some(crate::slots::MIN_SLOT_CAPACITY),
+        )
+        .unwrap();
+        let mut entry = Entry::new("github");
+        entry.set_password("one".into());
+        vault.add(entry).unwrap();
+        vault.save().unwrap();
+
+        let mut app = App::new(&egui::Context::default());
+        app.session.config.use_container = false;
+        app.session.config.vault_path = path;
+        app.session.adopt(OpenVault {
+            vault,
+            container: None,
+        });
+        app.screen = Screen::Main;
+        app
+    }
+
+    fn reopened(home: &TestHome) -> Vault {
+        Vault::open(&home.join("vault.ddv"), &Secret::from_str("editor"), true).unwrap()
+    }
+
+    #[test]
+    fn a_rename_that_only_changes_case_is_saved() {
+        let home = TestHome::new("editor-case");
+        let mut app = open_app(&home);
+        select_entry(&mut app, "github");
+        app.draft.as_mut().unwrap().name = "GitHub".into();
+
+        assert!(commit_draft(&mut app));
+        assert_eq!(reopened(&home).data.find("github").unwrap().name, "GitHub");
+    }
+
+    #[test]
+    fn an_edit_whose_save_failed_can_be_saved_again() {
+        let home = TestHome::new("editor-retry");
+        let mut app = open_app(&home);
+        select_entry(&mut app, "github");
+        app.draft.as_mut().unwrap().name = "Code host".into();
+        {
+            let _armed = crate::vault::faults::arm("save", "write");
+            assert!(!commit_draft(&mut app), "the disk refused it");
+        }
+        let draft = app.draft.as_ref().expect("what was typed is kept");
+        assert_eq!(draft.original_key.as_deref(), Some("code host"));
+
+        assert!(commit_draft(&mut app), "and a second Save goes through");
+        let vault = reopened(&home);
+        assert!(vault.data.find("code host").is_some());
+        assert!(vault.data.find("github").is_none());
+    }
+
+    #[test]
+    fn a_new_entry_whose_save_failed_is_not_added_twice() {
+        let home = TestHome::new("editor-new-retry");
+        let mut app = open_app(&home);
+        app.draft = Some(Draft::blank());
+        app.draft.as_mut().unwrap().name = "Mail".into();
+        {
+            let _armed = crate::vault::faults::arm("save", "write");
+            assert!(!commit_draft(&mut app));
+        }
+        assert!(commit_draft(&mut app), "not refused as already existing");
+        let vault = reopened(&home);
+        assert_eq!(vault.data.entries.iter().filter(|e| e.key() == "mail").count(), 1);
+    }
+
+    #[test]
+    fn leaving_an_edit_asks_first_and_leaving_a_glance_does_not() {
+        let home = TestHome::new("editor-leave");
+        let mut app = open_app(&home);
+
+        select_entry(&mut app, "github");
+        leave_editor(&mut app, Leave::New);
+        assert!(app.leaving.is_none(), "nothing typed, nothing to ask");
+        assert!(app.draft.as_ref().unwrap().original_key.is_none());
+
+        select_entry(&mut app, "github");
+        app.draft.as_mut().unwrap().password = Zeroizing::new("two".into());
+        leave_editor(&mut app, Leave::Close);
+        assert_eq!(app.leaving, Some(Leave::Close));
+        assert_eq!(*app.draft.as_ref().unwrap().password, "two", "not thrown away yet");
+    }
+
+    #[test]
+    fn a_file_added_twice_gets_a_second_name() {
+        let taken = [
+            crate::model::Attachment::new("scan.pdf", b"one"),
+            crate::model::Attachment::new("scan (2).pdf", b"two"),
+        ];
+        assert_eq!(unique_attachment_name(&taken, "other.pdf"), "other.pdf");
+        assert_eq!(unique_attachment_name(&taken, "scan.pdf"), "scan (3).pdf");
+        let bare = [crate::model::Attachment::new("README", b"x")];
+        assert_eq!(unique_attachment_name(&bare, "README"), "README (2)");
+    }
+
+    #[test]
+    fn an_attachment_whose_save_failed_is_not_left_behind() {
+        let home = TestHome::new("editor-attach");
+        let mut app = open_app(&home);
+        {
+            let _armed = crate::vault::faults::arm("save", "write");
+            assert!(attach(&mut app, "github", "scan.pdf", b"bytes").is_err());
+        }
+        let entry = app.session.vault().unwrap().data.find("github").unwrap();
+        assert!(entry.attachments.is_empty(), "not listed as if it were stored");
+
+        attach(&mut app, "github", "scan.pdf", b"one").unwrap();
+        attach(&mut app, "github", "scan.pdf", b"two").unwrap();
+        {
+            let _armed = crate::vault::faults::arm("save", "write");
+            assert!(detach(&mut app, "github", 0).is_err());
+        }
+        let names: Vec<String> = app.session.vault().unwrap().data.find("github").unwrap()
+            .attachments.iter().map(|a| a.name.clone()).collect();
+        assert_eq!(names, ["scan.pdf", "scan (2).pdf"], "put back where it was");
+
+        detach(&mut app, "github", 0).unwrap();
+        let vault = reopened(&home);
+        let entry = vault.data.find("github").unwrap();
+        assert_eq!(entry.attachments.len(), 1, "only the one asked for");
+        assert_eq!(entry.attachments[0].name, "scan (2).pdf");
     }
 
     #[test]

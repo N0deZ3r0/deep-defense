@@ -533,6 +533,11 @@ pub struct EntryText {
     pub delete_title: &'static str,
     pub delete_body: &'static str,
     pub deleted: &'static str,
+    pub unsaved_title: &'static str,
+    /// "{}" is the entry name.
+    pub unsaved_body: &'static str,
+    pub unsaved_discard: &'static str,
+    pub unsaved_keep: &'static str,
     pub copied_username: &'static str,
     /// "{}" is a number of seconds.
     pub copied_password: &'static str,
@@ -851,6 +856,10 @@ pub static EN: Strings = Strings {
         delete_body: "The entry and its password history are removed from the vault. Earlier \
                       .bak files beside the vault will still contain it.",
         deleted: "Entry deleted.",
+        unsaved_title: "Unsaved changes",
+        unsaved_body: "Save the changes to \"{}\" before leaving it?",
+        unsaved_discard: "Discard",
+        unsaved_keep: "Keep editing",
         copied_username: "Username copied.",
         copied_password: "Password copied. The clipboard clears in {}s.",
         autotype: "Type into the active window",
@@ -1441,6 +1450,10 @@ pub static RU: Strings = Strings {
         delete_body: "Запись и история её паролей будут удалены из хранилища. В прежних \
                       файлах .bak рядом с хранилищем она останется.",
         deleted: "Запись удалена.",
+        unsaved_title: "Несохранённые изменения",
+        unsaved_body: "Сохранить изменения в «{}», прежде чем уйти?",
+        unsaved_discard: "Не сохранять",
+        unsaved_keep: "Продолжить правку",
         copied_username: "Логин скопирован.",
         copied_password: "Пароль скопирован. Буфер очистится через {} с.",
         autotype: "Набрать в активном окне",
@@ -1818,7 +1831,7 @@ mod tests {
     fn placeholders_match_between_languages() {
         // A translation that drops a "{}" silently loses the number it was
         // supposed to show, and one that adds an extra leaves "{}" on screen.
-        let pairs: [(&str, &str, &str); 52] = [
+        let pairs: [(&str, &str, &str); 53] = [
             ("shell.locks_in", EN.shell.locks_in, RU.shell.locks_in),
             (
                 "shell.clipboard_clears_in",
@@ -1879,6 +1892,7 @@ mod tests {
             ("errors.copy_backup", EN.errors.copy_backup, RU.errors.copy_backup),
             ("errors.copy_mirror", EN.errors.copy_mirror, RU.errors.copy_mirror),
             ("shell.newer_body", EN.shell.newer_body, RU.shell.newer_body),
+            ("entry.unsaved_body", EN.entry.unsaved_body, RU.entry.unsaved_body),
         ];
         for (name, en, ru) in pairs {
             assert_eq!(
