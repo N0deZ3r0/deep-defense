@@ -69,6 +69,10 @@ pub struct Entry {
     pub created_at: String,
     #[serde(default = "now")]
     pub updated_at: String,
+    /// When the current password was set. Absent from vaults saved before it
+    /// was kept, and then worked out from the history instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_set_at: Option<String>,
     #[serde(default)]
     pub history: Vec<HistoricPassword>,
     #[serde(default)]
@@ -120,6 +124,7 @@ impl Entry {
             tags: Vec::new(),
             created_at: now(),
             updated_at: now(),
+            password_set_at: None,
             history: Vec::new(),
             attachments: Vec::new(),
             fields: Vec::new(),
@@ -131,8 +136,22 @@ impl Entry {
         self.name.trim().to_lowercase()
     }
 
+    /// How old the password is, in days.
+    ///
+    /// Of the password, not of the entry. Counted from the last edit of any
+    /// kind, fixing a typo in the notes made a password from years ago look
+    /// new, and the warning that it wanted changing went away.
     pub fn age_days(&self) -> Option<i64> {
-        age_days(&self.updated_at)
+        age_days(self.password_since())
+    }
+
+    /// When the current password was set: as recorded, or else when the one
+    /// before it was replaced, or else when the entry was made.
+    pub fn password_since(&self) -> &str {
+        self.password_set_at
+            .as_deref()
+            .or_else(|| self.history.first().map(|old| old.replaced_at.as_str()))
+            .unwrap_or(&self.created_at)
     }
 
     pub fn touch(&mut self) {
@@ -142,9 +161,14 @@ impl Entry {
     /// Replace the password, pushing the old one onto the history.
     /// Returns whether the password actually changed, so the caller can log
     /// it without having to compare the strings a second time.
-    pub fn set_password(&mut self, new_password: String) -> bool {
-        let changed = self.password != new_password;
-        if !self.password.is_empty() && new_password != self.password {
+    pub fn set_password(&mut self, mut new_password: String) -> bool {
+        if self.password == new_password {
+            // Called on every save, changed or not: an unchanged password
+            // leaves the dates alone, and the copy goes the way the rest do.
+            new_password.zeroize();
+            return false;
+        }
+        if !self.password.is_empty() {
             self.history.insert(
                 0,
                 HistoricPassword {
@@ -155,8 +179,9 @@ impl Entry {
             self.history.truncate(MAX_HISTORY);
         }
         self.password = new_password;
+        self.password_set_at = Some(now());
         self.touch();
-        changed
+        true
     }
 
     /// Search across everything except the password itself.
@@ -642,6 +667,38 @@ mod audit_tests {
         assert!(!entry.set_password("first".into()), "the same value is not");
         assert!(entry.set_password("second".into()));
         assert_eq!(entry.history.len(), 1);
+    }
+
+    #[test]
+    fn a_password_is_as_old_as_the_last_time_it_changed() {
+        let long_ago = "2020-01-01T00:00:00+00:00".to_string();
+        let mut entry = Entry::new("Bank");
+        entry.set_password("from 2020".into());
+        entry.password_set_at = Some(long_ago.clone());
+        entry.updated_at = long_ago;
+
+        // Saving the entry again, with a new note and the same password.
+        entry.notes = "new branch address".into();
+        entry.touch();
+        assert!(!entry.set_password("from 2020".into()));
+        assert!(entry.age_days().unwrap() > 365, "a note does not renew a password");
+
+        assert!(entry.set_password("from today".into()));
+        assert_eq!(entry.age_days(), Some(0));
+    }
+
+    #[test]
+    fn a_vault_from_before_the_date_was_kept_reads_it_from_the_history() {
+        let mut entry = Entry::new("Bank");
+        entry.created_at = "2019-01-01T00:00:00+00:00".into();
+        entry.updated_at = now();
+        assert!(entry.age_days().unwrap() > 365, "never changed: as old as the entry");
+
+        entry.history.push(HistoricPassword {
+            password: "older".into(),
+            replaced_at: "2021-06-01T00:00:00+00:00".into(),
+        });
+        assert_eq!(entry.password_since(), "2021-06-01T00:00:00+00:00");
     }
 
     #[test]
