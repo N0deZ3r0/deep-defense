@@ -711,6 +711,10 @@ pub fn change_master_password(
 
     let container_path = config.container_path.clone();
 
+    // Checked before anything is written: refused at step 2, it would leave a
+    // wrapping behind for a password the vault never took.
+    open.vault.refuse_shared_password(&new_secret)?;
+
     // Step 1: both passwords now open the container.
     let new_wrapping = container
         .meta

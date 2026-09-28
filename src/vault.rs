@@ -21,6 +21,17 @@ use crate::secret::{Key, Secret};
 
 /// How many previous vault files to keep beside the current one.
 const BACKUP_COUNT: usize = 5;
+
+/// Why a password was turned down for a second vault in the same file.
+///
+/// Public so the interface can tell these apart from other failures and say
+/// them in the user's language.
+pub const HIDDEN_SAME_PASSWORD: &str =
+    "the hidden vault needs a password of its own; that one already opens this vault";
+pub const HIDDEN_EXISTS: &str = "a hidden vault already exists under that password";
+pub const PASSWORD_OPENS_OTHER: &str =
+    "that password already opens the other vault in this file, and an unlock opens only one";
+
 const ANCHOR_FILENAME: &str = "revision.anchor";
 const ANCHOR_CONTEXT: &[u8] = b"deep-defense/rollback-anchor/v1";
 
@@ -1517,6 +1528,7 @@ impl Vault {
     /// — including a hidden vault whose password we do not have. They are
     /// therefore fixed when the file is created.
     pub fn change_master(&mut self, new_secret: &Secret) -> Result<()> {
+        self.refuse_shared_password(new_secret)?;
         let previous_audit = self.data.audit.clone();
         self.data.record(AuditAction::MasterPasswordChanged, "");
         let (new_key, new_salt) = self.file.prepare_slot(new_secret)?;
@@ -1549,6 +1561,26 @@ impl Vault {
         }
     }
 
+    /// Refuse a new password that already opens another slot in this file.
+    ///
+    /// An unlock opens whichever slot answers first, and only that one. Two
+    /// slots under one password leave the other unreachable for as long as
+    /// they share it — and the one that goes dark is the hidden vault, the
+    /// one nobody else knows is there to ask about.
+    ///
+    /// Answering honestly gives nothing away: only someone who already knows
+    /// the other slot's password can be refused.
+    pub fn refuse_shared_password(&self, secret: &Secret) -> Result<()> {
+        let current = self.current_file().unwrap_or_else(|_| self.file.clone());
+        let shared = (0..slots::SLOT_COUNT)
+            .filter(|&index| index != self.slot)
+            .any(|index| current.slot_opens(index, secret));
+        if shared {
+            return Err(Error::vault(PASSWORD_OPENS_OTHER));
+        }
+        Ok(())
+    }
+
     /// Create a second, hidden vault in this file under another password.
     ///
     /// Returns the new vault, open and empty. The vault this was called on is
@@ -1559,6 +1591,11 @@ impl Vault {
                 "this is already the hidden vault; a file holds at most two",
             ));
         }
+        // Under this vault's own password the new one could never be opened:
+        // this slot would answer first, every time.
+        if self.secret_opens_this_slot(secret) {
+            return Err(Error::vault(HIDDEN_SAME_PASSWORD));
+        }
         // Against the file on disk: a hidden vault may have been created
         // since this one was opened.
         let current = self.current_file().unwrap_or_else(|_| {
@@ -1568,9 +1605,7 @@ impl Vault {
             self.file.clone()
         });
         if current.slot_opens(slots::HIDDEN_SLOT, secret) {
-            return Err(Error::vault(
-                "a hidden vault already exists under that password",
-            ));
+            return Err(Error::vault(HIDDEN_EXISTS));
         }
         Vault::create_in_slot(
             &self.path,
@@ -1875,7 +1910,50 @@ mod tests {
         let decoy = small_vault(&dir.vault(), &Secret::from_str("decoy"));
         let secret = Secret::from_str("hidden");
         let _first = decoy.create_hidden(&secret).unwrap();
-        assert!(decoy.create_hidden(&secret).is_err());
+        let err = decoy.create_hidden(&secret).expect_err("already taken");
+        assert!(matches!(err, Error::Vault(ref m) if m == HIDDEN_EXISTS));
+    }
+
+    #[test]
+    fn a_hidden_vault_under_this_vaults_own_password_is_refused() {
+        // Accepted, it was written — and never seen again: the decoy's slot
+        // answers first to its own password, so the unlock never reached it.
+        let dir = TempDir::new("hidden-same");
+        let secret = Secret::from_str("one password for both");
+        let decoy = small_vault(&dir.vault(), &secret);
+
+        let err = decoy.create_hidden(&secret).expect_err("must be refused");
+        assert!(matches!(err, Error::Vault(ref m) if m == HIDDEN_SAME_PASSWORD));
+
+        let reopened = Vault::open(&dir.vault(), &secret, true).unwrap();
+        assert!(!reopened.is_hidden());
+        assert!(reopened.hidden_slot_is_free(&secret), "nothing was written");
+    }
+
+    #[test]
+    fn a_new_password_that_opens_the_other_vault_is_refused() {
+        let dir = TempDir::new("shared-password");
+        let decoy_pw = Secret::from_str("decoy");
+        let hidden_pw = Secret::from_str("hidden");
+        let mut decoy = small_vault(&dir.vault(), &decoy_pw);
+        let mut hidden = decoy.create_hidden(&hidden_pw).unwrap();
+        hidden.add(sample_entry("Real", "kept")).unwrap();
+        hidden.save().unwrap();
+
+        // From either side, taking the other's password would hide the
+        // hidden vault behind the decoy for good.
+        let err = decoy.change_master(&hidden_pw).expect_err("decoy side");
+        assert!(matches!(err, Error::Vault(ref m) if m == PASSWORD_OPENS_OTHER));
+        let err = hidden.change_master(&decoy_pw).expect_err("hidden side");
+        assert!(matches!(err, Error::Vault(ref m) if m == PASSWORD_OPENS_OTHER));
+        drop(hidden);
+        drop(decoy);
+
+        // Nothing moved: each password still opens its own vault.
+        assert!(!Vault::open(&dir.vault(), &decoy_pw, true).unwrap().is_hidden());
+        let hidden = Vault::open(&dir.vault(), &hidden_pw, true).unwrap();
+        assert!(hidden.is_hidden());
+        assert_eq!(hidden.data.find("real").unwrap().password, "kept");
     }
 
     /// The other half of the same question, and the uncomfortable half.

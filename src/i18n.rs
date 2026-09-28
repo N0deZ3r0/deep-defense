@@ -328,6 +328,9 @@ pub struct HiddenText {
     pub in_hidden_title: &'static str,
     pub in_hidden_body: &'static str,
     pub unavailable: &'static str,
+    pub opens_other: &'static str,
+    pub container_title: &'static str,
+    pub container_body: &'static str,
 }
 
 pub struct HistoryText {
@@ -1007,6 +1010,12 @@ pub static EN: Strings = Strings {
         in_hidden_body: "The other vault in this file is untouched and still opens with \
                          its own password.",
         unavailable: "This is already the hidden vault; a file holds at most two.",
+        opens_other: "That password already opens the other vault in this file. An unlock \
+                      opens only one of them, so the other would be out of reach.",
+        container_title: "Not available inside a VeraCrypt container",
+        container_body: "The container opens only with this vault's master password, so a \
+                         vault under another password inside it could never be reached. \
+                         Hidden vaults work with a standalone vault file.",
     },
     history: HistoryText {
         title: "Change history",
@@ -1591,6 +1600,12 @@ pub static RU: Strings = Strings {
         in_hidden_body: "Второе хранилище в этом файле не затронуто и открывается своим \
                          паролем.",
         unavailable: "Это и есть скрытое хранилище; в файле их не больше двух.",
+        opens_other: "Этот пароль уже открывает второе хранилище в этом файле. Разблокировка \
+                      открывает только одно из них, и второе стало бы недоступно.",
+        container_title: "Недоступно внутри контейнера VeraCrypt",
+        container_body: "Контейнер открывается только мастер-паролем этого хранилища, поэтому \
+                         хранилище под другим паролем внутри него было бы недоступно. Скрытые \
+                         хранилища работают с отдельным файлом хранилища.",
     },
     history: HistoryText {
         title: "История изменений",

@@ -477,7 +477,28 @@ fn change_master_password(app: &mut App) {
                 app.status = Some(Status::success(strings.settings.changed));
             }
         }
-        Err(e) => app.status = Some(Status::error(strings, &e)),
+        Err(e) => app.status = Some(Status::error(strings, &said_as_refusal(strings, e))),
+    }
+}
+
+/// The vault's refusals about which password goes where, in the user's
+/// language. Anything else passes through as it came.
+fn said_as_refusal(strings: &Strings, e: crate::errors::Error) -> crate::errors::Error {
+    let known = [
+        (crate::vault::HIDDEN_SAME_PASSWORD, strings.hidden.same_password),
+        (crate::vault::HIDDEN_EXISTS, strings.hidden.exists),
+        (crate::vault::PASSWORD_OPENS_OTHER, strings.hidden.opens_other),
+    ];
+    let said = match &e {
+        crate::errors::Error::Vault(message) => known
+            .iter()
+            .find(|(refusal, _)| message.as_str() == *refusal)
+            .map(|(_, said)| *said),
+        _ => None,
+    };
+    match said {
+        Some(said) => crate::errors::Error::vault(said),
+        None => e,
     }
 }
 
@@ -496,6 +517,21 @@ fn hidden_vault_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, str
                 Icon::Info,
                 strings.hidden.in_hidden_title,
                 strings.hidden.in_hidden_body,
+            );
+            return;
+        }
+
+        // The volume opens only under the wrapping made for this vault's
+        // password, so a vault under any other password inside it would be
+        // written, announced as created, and never reachable.
+        if app.session.uses_container() {
+            widgets::notice(
+                ui,
+                palette,
+                palette.accent,
+                Icon::Info,
+                strings.hidden.container_title,
+                strings.hidden.container_body,
             );
             return;
         }
@@ -576,15 +612,10 @@ fn hidden_vault_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, str
 
         let matches_confirm =
             *app.settings.hidden_password == *app.settings.hidden_confirm;
-        // Reusing this vault's own password would put both vaults behind one
-        // secret and defeat the point entirely.
-        let same_as_current = !app.settings.hidden_password.is_empty()
-            && app
-                .session
-                .vault()
-                .is_some_and(|v| !v.hidden_slot_is_free(&Secret::from_str(
-                    &app.settings.hidden_password,
-                )));
+        // Whether the password is this vault's own, or already a hidden one's,
+        // is asked when the button is pressed rather than on every frame:
+        // each answer is a full Argon2id derivation, and asked per frame it
+        // froze the window for as long as anything was typed.
 
         if !app.settings.hidden_password.is_empty() {
             match check_master_password(&app.settings.hidden_password) {
@@ -600,14 +631,9 @@ fn hidden_vault_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, str
                 widgets::error_text(ui, palette, strings.breach.warning_master);
             }
         }
-        if same_as_current {
-            widgets::error_text(ui, palette, strings.hidden.exists);
-        }
-
         ui.add_space(theme::space::MD);
         ui.horizontal(|ui| {
             let ready = matches_confirm
-                && !same_as_current
                 && !app.breach.contains(&app.settings.hidden_password)
                 && check_master_password(&app.settings.hidden_password).is_none();
             if widgets::primary_button(ui, palette, strings.hidden.create_confirm, ready)
@@ -655,7 +681,7 @@ fn create_hidden_vault(app: &mut App) {
                 format!("{} {}", strings.hidden.created_body, strings.backups.hidden_note),
             ));
         }
-        Err(e) => app.status = Some(Status::error(strings, &e)),
+        Err(e) => app.status = Some(Status::error(strings, &said_as_refusal(strings, e))),
     }
 }
 

@@ -265,6 +265,10 @@ we decided it, and the reason is written down.
     a tool for protecting your data and worth fetching from the project's own page
     yourself. The command-line construction is covered by tests; the first real
     container will be yours.
+18. **No hidden vault inside a VeraCrypt container.** The volume opens only with the
+    master password the container was made under, so a vault under another password
+    inside it could never be reached. Settings says so instead of offering one; hidden
+    vaults are for the standalone vault file.
 
 ## Build
 
