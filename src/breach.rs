@@ -48,6 +48,10 @@ const USER_FILENAME: &str = "breached.user.bloom";
 const MAX_M_BITS: u64 = 1 << 28;
 /// Below this a filter is so crowded that every answer is "yes".
 const MIN_M_BITS: u64 = 1 << 10;
+/// The false-alarm rate an import may push a list to before it gets a new one.
+/// Sixteen bits per entry, which is what `size_for` allows, gives about half
+/// of this.
+const MAX_FALSE_POSITIVE_RATE: f64 = 1.0 / 1000.0;
 
 /// The block of bits shipped inside the executable.
 static BUNDLED: &[u8] = include_bytes!("../assets/breached.bloom");
@@ -101,6 +105,23 @@ impl Filter {
             count,
             bits: Cow::Owned(body.to_vec()),
         })
+    }
+
+    /// How many bytes the filter at the start of `bytes` takes up, read from
+    /// its header, so that several can be stored one after another.
+    fn stored_length(bytes: &[u8]) -> Result<usize> {
+        if bytes.len() < HEADER_LEN {
+            return Err(Error::format("that file is too short to be a filter"));
+        }
+        let m_bits = u64::from_be_bytes(bytes[13..21].try_into().unwrap_or([0; 8]));
+        if !(MIN_M_BITS..=MAX_M_BITS).contains(&m_bits) || !m_bits.is_multiple_of(8) {
+            return Err(Error::format("that filter claims an impossible size"));
+        }
+        let length = HEADER_LEN + (m_bits / 8) as usize;
+        if length > bytes.len() {
+            return Err(Error::format("that filter is cut short"));
+        }
+        Ok(length)
     }
 
     fn parse_inner(bytes: &[u8]) -> Result<(u32, u64, u64, &[u8])> {
@@ -198,6 +219,30 @@ impl Filter {
     pub fn false_positive_rate(&self) -> f32 {
         self.saturation().powi(self.k as i32)
     }
+
+    /// Whether `more` passwords can go in without the false-alarm rate
+    /// climbing past what an import is allowed to cost.
+    ///
+    /// Estimated from the count rather than the bits, so it can be asked
+    /// before anything is added: the expected fraction of bits set with `n`
+    /// items in is `1 - e^(-kn/m)`, and a false alarm needs all `k` of them.
+    fn has_room_for(&self, more: u64) -> bool {
+        let items = self.count.saturating_add(more) as f64;
+        let set = 1.0 - (-(self.k as f64) * items / self.m_bits as f64).exp();
+        set.powi(self.k as i32) <= MAX_FALSE_POSITIVE_RATE
+    }
+}
+
+/// Every filter in a file of them, one after another. A file written before
+/// there could be more than one holds exactly one, and reads the same way.
+fn parse_all(mut bytes: &[u8]) -> Result<Vec<Filter>> {
+    let mut filters = Vec::new();
+    while !bytes.is_empty() {
+        let (one, rest) = bytes.split_at(Filter::stored_length(bytes)?);
+        filters.push(Filter::parse_owned(one)?);
+        bytes = rest;
+    }
+    Ok(filters)
 }
 
 fn digest_of(password: &str) -> [u8; 20] {
@@ -215,7 +260,12 @@ pub struct ImportSummary {
 /// The bundled list plus whatever the user has imported.
 pub struct Catalogue {
     bundled: Option<Filter>,
-    user: Option<Filter>,
+    /// One filter per import that did not fit in the one before. A filter's
+    /// size is fixed when it is made, and each used to be sized for the
+    /// first list alone: a short first import took every later one in, and a
+    /// thousand bits holding a million passwords answered "leaked" to
+    /// everything — the master password on the setup screen included.
+    user: Vec<Filter>,
 }
 
 impl Catalogue {
@@ -231,7 +281,8 @@ impl Catalogue {
         };
         let user = std::fs::read(user_path())
             .ok()
-            .and_then(|bytes| Filter::parse_owned(&bytes).ok());
+            .and_then(|bytes| parse_all(&bytes).ok())
+            .unwrap_or_default();
         Self { bundled, user }
     }
 
@@ -239,7 +290,7 @@ impl Catalogue {
     pub fn bundled_only() -> Self {
         Self {
             bundled: Filter::parse(BUNDLED).ok(),
-            user: None,
+            user: Vec::new(),
         }
     }
 
@@ -251,15 +302,24 @@ impl Catalogue {
         self.bundled
             .as_ref()
             .is_some_and(|f| f.contains_digest(&digest))
-            || self.user.as_ref().is_some_and(|f| f.contains_digest(&digest))
+            || self.user.iter().any(|f| f.contains_digest(&digest))
     }
 
     pub fn bundled(&self) -> Option<&Filter> {
         self.bundled.as_ref()
     }
 
-    pub fn user(&self) -> Option<&Filter> {
-        self.user.as_ref()
+    /// How many passwords have been imported, or `None` if none have.
+    pub fn imported_count(&self) -> Option<u64> {
+        if self.user.is_empty() {
+            return None;
+        }
+        Some(self.user.iter().map(Filter::count).sum())
+    }
+
+    /// True when an imported list is crowded enough to raise false alarms.
+    pub fn imported_crowded(&self) -> bool {
+        self.user.iter().any(|f| f.saturation() > 0.7)
     }
 
     /// Adds a wordlist. Understands plaintext, one per line, and the SHA-1
@@ -276,15 +336,14 @@ impl Catalogue {
             return Err(Error::format("that file holds no passwords"));
         }
 
-        if self.user.is_none() {
-            self.user = Some(Filter::new(
-                size_for(candidates.len() as u64),
-                hashes_for(size_for(candidates.len() as u64), candidates.len() as u64),
-            )?);
+        let incoming = candidates.len() as u64;
+        if !self.user.last().is_some_and(|last| last.has_room_for(incoming)) {
+            let m_bits = size_for(incoming);
+            self.user.push(Filter::new(m_bits, hashes_for(m_bits, incoming))?);
         }
         let filter = self
             .user
-            .as_mut()
+            .last_mut()
             .ok_or_else(|| Error::format("no list to add to"))?;
 
         let mut summary = ImportSummary::default();
@@ -309,20 +368,21 @@ impl Catalogue {
     }
 
     pub fn save_user(&self) -> Result<()> {
-        let Some(filter) = &self.user else {
+        if self.user.is_empty() {
             return Ok(());
-        };
+        }
         crate::config::ensure_app_dir()?;
         let path = user_path();
         let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, filter.to_bytes()).map_err(|e| Error::io(tmp.clone(), e))?;
+        let bytes: Vec<u8> = self.user.iter().flat_map(Filter::to_bytes).collect();
+        std::fs::write(&tmp, bytes).map_err(|e| Error::io(tmp.clone(), e))?;
         std::fs::rename(&tmp, &path).map_err(|e| Error::io(path.clone(), e))?;
         Ok(())
     }
 
     /// Discards the imported list, leaving the bundled one.
     pub fn forget_user(&mut self) -> Result<()> {
-        self.user = None;
+        self.user.clear();
         let path = user_path();
         if path.exists() {
             std::fs::remove_file(&path).map_err(|e| Error::io(path, e))?;
@@ -668,7 +728,7 @@ mod tests {
     fn a_plaintext_list_is_imported() {
         let mut catalogue = Catalogue {
             bundled: None,
-            user: None,
+            user: Vec::new(),
         };
         let summary = catalogue
             .import("hunter2\ncorrect-horse\n\n# a comment\nтройка\n")
@@ -688,7 +748,7 @@ mod tests {
         // "password" hashes to this.
         let mut catalogue = Catalogue {
             bundled: None,
-            user: None,
+            user: Vec::new(),
         };
         let summary = catalogue
             .import("5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8:9659365\n")
@@ -701,7 +761,7 @@ mod tests {
     fn a_digest_without_a_count_is_still_a_digest() {
         let mut catalogue = Catalogue {
             bundled: None,
-            user: None,
+            user: Vec::new(),
         };
         catalogue
             .import("5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8\n")
@@ -722,7 +782,7 @@ mod tests {
     fn a_mixed_list_is_imported_and_counted_honestly() {
         let mut catalogue = Catalogue {
             bundled: None,
-            user: None,
+            user: Vec::new(),
         };
         let summary = catalogue
             .import(
@@ -746,7 +806,7 @@ mod tests {
     fn an_empty_list_is_refused_rather_than_silently_doing_nothing() {
         let mut catalogue = Catalogue {
             bundled: None,
-            user: None,
+            user: Vec::new(),
         };
         assert!(catalogue.import("").is_err());
         assert!(catalogue.import("\n\n   \n# only comments\n").is_err());
@@ -756,13 +816,53 @@ mod tests {
     fn a_second_import_adds_to_the_first() {
         let mut catalogue = Catalogue {
             bundled: None,
-            user: None,
+            user: Vec::new(),
         };
         catalogue.import("first\n").unwrap();
         catalogue.import("second\n").unwrap();
         assert!(catalogue.contains("first"));
         assert!(catalogue.contains("second"));
-        assert_eq!(catalogue.user().unwrap().count(), 2);
+        assert_eq!(catalogue.imported_count(), Some(2));
+    }
+
+    #[test]
+    fn a_large_import_after_a_small_one_gets_room_of_its_own() {
+        // The first list sized the only filter there was; the second went
+        // into it regardless, and filled every bit.
+        let mut catalogue = Catalogue {
+            bundled: None,
+            user: Vec::new(),
+        };
+        catalogue.import("just-one\n").unwrap();
+        let many = (0..20_000).map(|i| format!("leaked-{i}")).collect::<Vec<_>>();
+        let many = many.join("\n");
+        catalogue.import(&many).unwrap();
+
+        assert!(catalogue.contains("just-one"));
+        assert!(catalogue.contains("leaked-0"));
+        assert!(catalogue.contains("leaked-19999"));
+        assert_eq!(catalogue.imported_count(), Some(20_001));
+        assert!(!catalogue.imported_crowded());
+        let false_alarms = (0..2_000)
+            .filter(|i| catalogue.contains(&format!("never-imported-{i}")))
+            .count();
+        assert!(false_alarms < 20, "{false_alarms} of 2000 reported as leaked");
+    }
+
+    #[test]
+    fn several_lists_are_still_there_after_a_restart() {
+        let _home = crate::config::test_home::TestHome::new("breach-several");
+        let mut catalogue = Catalogue::bundled_only();
+        catalogue.import("just-one\n").unwrap();
+        let many = (0..5_000).map(|i| format!("leaked-{i}")).collect::<Vec<_>>();
+        let many = many.join("\n");
+        catalogue.import(&many).unwrap();
+        catalogue.save_user().unwrap();
+
+        let reopened = Catalogue::load();
+        assert_eq!(reopened.imported_count(), Some(5_001));
+        assert!(reopened.contains("just-one"));
+        assert!(reopened.contains("leaked-4999"));
     }
 
     #[test]
@@ -793,7 +893,7 @@ mod tests {
         // degrade into "I cannot check", never into "everything is leaked".
         let catalogue = Catalogue {
             bundled: None,
-            user: None,
+            user: Vec::new(),
         };
         assert!(!catalogue.contains("password"));
         assert!(!catalogue.contains("anything"));
@@ -816,7 +916,7 @@ mod tests {
         assert!(reopened.contains("a-password-of-my-own"));
         assert!(reopened.contains("another-one"));
         assert!(reopened.contains("qwerty"), "and the bundled list as well");
-        assert_eq!(reopened.user().map(|f| f.count()), Some(2));
+        assert_eq!(reopened.imported_count(), Some(2));
     }
 
     #[test]
@@ -847,7 +947,7 @@ mod tests {
         std::fs::write(user_path(), b"this is not a filter").unwrap();
 
         let catalogue = Catalogue::load();
-        assert!(catalogue.user().is_none(), "the damaged list is dropped");
+        assert!(catalogue.imported_count().is_none(), "the damaged list is dropped");
         assert!(catalogue.contains("qwerty"), "the bundled one still answers");
         assert!(!catalogue.contains("a-password-nobody-has-used"));
     }

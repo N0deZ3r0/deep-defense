@@ -1775,14 +1775,14 @@ fn breach_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: 
             strings.breach.section,
             &fill1(strings.breach.bundled_body, bundled),
         );
-        if let Some(user) = app.breach.user() {
+        if let Some(count) = app.breach.imported_count() {
             widgets::info_row(
                 ui,
                 palette,
                 strings.breach.import,
-                &fill1(strings.breach.imported_body, user.count()),
+                &fill1(strings.breach.imported_body, count),
             );
-            if user.saturation() > 0.7 {
+            if app.breach.imported_crowded() {
                 ui.add_space(theme::space::XS);
                 widgets::error_text(ui, palette, strings.breach.crowded);
             }
@@ -1793,7 +1793,7 @@ fn breach_section(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: 
             if ui.button(strings.breach.import).clicked() {
                 import_wordlist(app);
             }
-            if app.breach.user().is_some() && ui.button(strings.breach.forget).clicked() {
+            if app.breach.imported_count().is_some() && ui.button(strings.breach.forget).clicked() {
                 let outcome = app.breach.forget_user();
                 if let Err(e) = outcome {
                     let strings = app.strings();
