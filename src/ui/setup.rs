@@ -39,8 +39,16 @@ impl SetupState {
                 config.container_path.display().to_string()
             },
             size_mb: 64,
-            keyfile_path: String::new(),
-            use_keyfile: false,
+            // What is configured, not a blank: coming back here to pick
+            // another path and pressing "Open existing" used to save an empty
+            // keyfile list over the real one, and the next unlock failed with
+            // nothing on screen saying why — or where the keyfile had been.
+            keyfile_path: config
+                .keyfiles
+                .first()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            use_keyfile: !config.keyfiles.is_empty(),
             acknowledged: false,
         }
     }
@@ -374,10 +382,16 @@ fn commit_paths(app: &mut App, use_container: bool) {
     } else {
         app.session.config.vault_path = std::path::PathBuf::from(app.setup.vault_path.trim());
     }
-    app.session.config.keyfiles = if app.setup.use_keyfile {
-        vec![std::path::PathBuf::from(app.setup.keyfile_path.trim())]
-    } else {
+    let typed = std::path::PathBuf::from(app.setup.keyfile_path.trim());
+    let configured = &app.session.config.keyfiles;
+    app.session.config.keyfiles = if !app.setup.use_keyfile {
         Vec::new()
+    } else if configured.first() == Some(&typed) {
+        // This screen shows one keyfile. Any others configured beside it
+        // stay, rather than being dropped for not being on screen.
+        configured.clone()
+    } else {
+        vec![typed]
     };
     let _ = app.session.config.save();
 }

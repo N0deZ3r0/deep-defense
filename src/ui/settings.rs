@@ -1267,20 +1267,22 @@ fn apply_rebuild(
     old_capacity: usize,
 ) {
     let strings = app.strings();
-    let own_typed = app.settings.resize_own_password.trim().to_string();
-    let other_typed = app.settings.resize_other_password.trim().to_string();
-    let own = if own_typed.is_empty() {
-        None
-    } else {
-        Some(Secret::from_str(&own_typed))
-    };
-    let other = if other_typed.is_empty() {
-        None
-    } else {
-        Some(Secret::from_str(&other_typed))
-    };
+    let keyfiles = app.session.config.keyfiles.clone();
 
     let outcome = (|| -> crate::errors::Result<crate::vault::MigrationReport> {
+        // Exactly as typed, and through the same combination an unlock uses.
+        // Trimmed, a password that ends in a space never matched; without the
+        // keyfiles, nothing matched for anyone who uses one — so the work
+        // factor could not be changed, and the only way to rebuild at all
+        // was to leave the other slot's password out and lose what was in it.
+        let combined = |typed: &Zeroizing<String>| -> crate::errors::Result<Option<Secret>> {
+            if typed.is_empty() {
+                return Ok(None);
+            }
+            crate::crypto::combine_secret(&Secret::from_str(typed), &keyfiles).map(Some)
+        };
+        let own = combined(&app.settings.resize_own_password)?;
+        let other = combined(&app.settings.resize_other_password)?;
         let vault = app
             .session
             .vault_mut()
