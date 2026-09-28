@@ -34,7 +34,7 @@ If it is a vulnerability rather than a bug, do not open an issue at all: see
 ## Running it
 
 ```bash
-cargo test            # 386 tests, about four minutes
+cargo test            # 404 tests, about four minutes
 cargo build --release
 ```
 
@@ -115,7 +115,7 @@ Argon2id, AES-256-GCM, XChaCha20-Poly1305, HKDF, схема Шамира над 
 ## Как запустить
 
 ```bash
-cargo test            # 386 тестов, около четырёх минут
+cargo test            # 404 теста, около четырёх минут
 cargo build --release
 ```
 
