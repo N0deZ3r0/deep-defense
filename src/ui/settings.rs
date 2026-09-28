@@ -886,6 +886,38 @@ fn export_vault(app: &mut App, as_json: bool) {
     }
 }
 
+/// Merge an export into the vault and save — or, if the save fails, take
+/// the new entries back out.
+///
+/// Left in after a failed save, they were listed as though imported, and an
+/// import too big for the slot made every later save fail with it until
+/// each of them was deleted by hand.
+fn merge_export(
+    vault: &mut crate::vault::Vault,
+    text: &str,
+    json: bool,
+    note: impl FnOnce(usize) -> String,
+) -> crate::errors::Result<crate::portable::ImportReport> {
+    let before = vault.data.entries.len();
+    let previous_audit = vault.data.audit.clone();
+    let report = if json {
+        crate::portable::from_json(&mut vault.data, text)?
+    } else {
+        crate::portable::from_csv(&mut vault.data, text)?
+    };
+    if report.added > 0 {
+        vault
+            .data
+            .record(crate::model::AuditAction::EntryAdded, note(report.added));
+        if let Err(e) = vault.save() {
+            vault.data.entries.truncate(before);
+            vault.data.audit = previous_audit;
+            return Err(e);
+        }
+    }
+    Ok(report)
+}
+
 fn import_vault(app: &mut App) {
     let strings = app.strings();
     let Some(path) = rfd::FileDialog::new()
@@ -905,21 +937,9 @@ fn import_vault(app: &mut App) {
             .session
             .vault_mut()
             .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
-        let report = if json {
-            crate::portable::from_json(&mut vault.data, &text)?
-        } else {
-            crate::portable::from_csv(&mut vault.data, &text)?
-        };
-        if report.added > 0 {
-            vault
-                .data
-                .record(crate::model::AuditAction::EntryAdded, fill1(
-                    strings.portable.audit_import,
-                    report.added,
-                ));
-            vault.save()?;
-        }
-        Ok(report)
+        merge_export(vault, &text, json, |added| {
+            fill1(strings.portable.audit_import, added)
+        })
     })();
 
     match outcome {
@@ -2151,4 +2171,38 @@ fn audit(app: &App) -> Vec<Finding> {
         }
     }
     findings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_import_whose_save_failed_is_taken_back_out() {
+        let home = crate::config::test_home::TestHome::new("settings-import");
+        let mut vault = crate::vault::Vault::create_in_slot(
+            &home.join("vault.ddv"),
+            &Secret::from_str("import"),
+            KdfParams {
+                m_cost: KdfParams::MIN_M_COST,
+                t_cost: 2,
+                p_cost: 1,
+                algorithm: "argon2id".into(),
+            },
+            crate::slots::PRIMARY_SLOT,
+            Some(crate::slots::MIN_SLOT_CAPACITY),
+        )
+        .unwrap();
+        let audit = vault.data.audit.len();
+        let csv = "name,password\nMail,one\nBank,two\n";
+        {
+            let _armed = crate::vault::faults::arm("save", "write");
+            assert!(merge_export(&mut vault, csv, false, |n| format!("{n}")).is_err());
+        }
+        assert!(vault.data.entries.is_empty(), "not listed as though imported");
+        assert_eq!(vault.data.audit.len(), audit);
+
+        let report = merge_export(&mut vault, csv, false, |n| format!("{n}")).unwrap();
+        assert_eq!(report.added, 2, "and nothing is counted as a duplicate of itself");
+    }
 }

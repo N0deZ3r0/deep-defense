@@ -155,6 +155,12 @@ pub fn from_csv(data: &mut VaultData, text: &str) -> Result<ImportReport> {
                 .map(|s| s.trim().to_owned())
                 .unwrap_or_default()
         };
+        // The password and the notes as they are. Trimmed, a password that
+        // begins or ends with a space came in as a different password —
+        // the one thing an import must carry across exactly.
+        let exact = |index: Option<usize>| -> String {
+            index.and_then(|i| row.get(i)).cloned().unwrap_or_default()
+        };
         let name = cell(Some(name_at));
         if name.is_empty() {
             report.malformed += 1;
@@ -168,14 +174,14 @@ pub fn from_csv(data: &mut VaultData, text: &str) -> Result<ImportReport> {
         let mut entry = Entry::new(&name);
         entry.username = cell(user_at);
         entry.url = cell(url_at);
-        entry.notes = cell(notes_at);
+        entry.notes = exact(notes_at);
         entry.totp_secret = cell(totp_at);
         entry.tags = cell(tags_at)
             .split([' ', ';', ','])
             .map(|t| t.trim().to_owned())
             .filter(|t| !t.is_empty())
             .collect();
-        entry.set_password(cell(pass_at));
+        entry.set_password(exact(pass_at));
         data.entries.push(entry);
         report.added += 1;
     }
@@ -541,6 +547,22 @@ mod tests {
                    "a newline and a comma inside a field must survive quoting");
         assert!(entry.attachments.is_empty(), "documented loss");
         assert!(entry.history.is_empty(), "documented loss");
+    }
+
+    #[test]
+    fn a_password_keeps_its_spaces_through_csv() {
+        let mut original = VaultData::default();
+        let mut entry = Entry::new("Spaced");
+        entry.set_password("  two on each side  ".into());
+        original.entries.push(entry);
+
+        let mut restored = VaultData::default();
+        from_csv(&mut restored, &to_csv(&original)).unwrap();
+        assert_eq!(restored.entries[0].password, "  two on each side  ");
+
+        let mut unquoted = VaultData::default();
+        from_csv(&mut unquoted, "name,password\nBare, leading space\n").unwrap();
+        assert_eq!(unquoted.entries[0].password, " leading space");
     }
 
     #[test]
