@@ -115,6 +115,7 @@ fn list_panel(app: &mut App, ui: &mut egui::Ui, rows: &[Row], tags: &[String]) {
                 .hint_text(strings.common.search)
                 .margin(egui::Margin::symmetric(9, 7)),
         );
+        widgets::describe(ui, &response, strings.common.search);
         if std::mem::take(&mut app.focus_search) {
             response.request_focus();
         }
@@ -630,12 +631,13 @@ fn identity_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &
             );
 
             widgets::field_label(ui, palette, strings.entry.notes);
-            ui.add(
+            let notes = ui.add(
                 egui::TextEdit::multiline(&mut draft.notes)
                     .desired_width(f32::INFINITY)
                     .desired_rows(3)
                     .margin(egui::Margin::symmetric(9, 7)),
             );
+            widgets::describe(ui, &notes, strings.entry.notes);
         }
     });
 
@@ -782,6 +784,7 @@ fn totp_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &Stri
                     .hint_text(strings.entry.totp_placeholder)
                     .margin(egui::Margin::symmetric(9, 7)),
             );
+            widgets::describe(ui, &response, strings.entry.totp_section);
             widgets::forget_edits(ui, &response);
         }
 
@@ -873,12 +876,13 @@ fn fields_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &St
 
         for (index, field) in draft.fields.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                ui.add(
+                let name_field = ui.add(
                     egui::TextEdit::singleline(&mut field.name)
                         .desired_width(110.0)
                         .hint_text(strings.entry.field_name)
                         .margin(egui::Margin::symmetric(8, 6)),
                 );
+                widgets::describe(ui, &name_field, strings.entry.field_name);
                 let value_width = (ui.available_width() - 140.0).max(70.0);
                 let value_field = ui.add(
                     egui::TextEdit::singleline(&mut field.value)
@@ -887,6 +891,14 @@ fn fields_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &St
                         .hint_text(strings.entry.field_value)
                         .margin(egui::Margin::symmetric(8, 6)),
                 );
+                // Called by the field's own name when it has one: "PIN" says
+                // more than a fifth "value" in a row of them.
+                let spoken = if field.name.trim().is_empty() {
+                    strings.entry.field_value
+                } else {
+                    field.name.trim()
+                };
+                widgets::describe(ui, &value_field, spoken);
                 if field.secret {
                     widgets::forget_edits(ui, &value_field);
                 }
