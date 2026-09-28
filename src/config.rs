@@ -200,19 +200,43 @@ impl Config {
         if !path.is_file() {
             return Ok(Self::default());
         }
-        let text = std::fs::read_to_string(&path).map_err(|e| Error::io(path.clone(), e))?;
-        // Strip a UTF-8 BOM. Notepad and PowerShell's `Out-File -Encoding utf8`
-        // both write one, and serde_json rejects it — which would silently cost
-        // the user every setting they had, since the caller falls back to
-        // defaults when this returns an error.
-        let text = text.strip_prefix('\u{feff}').unwrap_or(text.as_str());
-        let config: Config = serde_json::from_str(text).map_err(|e| {
+        let bytes = std::fs::read(&path).map_err(|e| Error::io(path.clone(), e))?;
+        let parsed = std::str::from_utf8(&bytes)
+            .map_err(|e| e.to_string())
+            .and_then(|text| {
+                // Strip a UTF-8 BOM. Notepad and PowerShell's `Out-File
+                // -Encoding utf8` both write one, and serde_json rejects it —
+                // which would cost the user every setting they had, since the
+                // caller falls back to defaults when this returns an error.
+                let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+                serde_json::from_str::<Config>(text).map_err(|e| e.to_string())
+            });
+        parsed.map_err(|reason| Self::set_aside(&path, &reason))
+    }
+
+    /// Move an unreadable settings file out of the way, and say where.
+    ///
+    /// The caller falls back to the defaults, and the defaults are saved at
+    /// the first change of language, theme or path — over this file, which
+    /// may hold the only spare copy of the container's key wrapping and the
+    /// only note of where the keyfiles are. The message used to say "delete
+    /// it"; the program then did, without asking, a moment later.
+    fn set_aside(path: &Path, reason: &str) -> Error {
+        let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+        let aside = path.with_file_name(format!("config.unreadable-{stamp}.json"));
+        if std::fs::rename(path, &aside).is_ok() {
             Error::config(format!(
-                "{} is not valid JSON ({e}). Delete it to start from defaults.",
+                "{} could not be read ({reason}). It was moved to {}, and the settings \
+                 start from their defaults; copy back from it anything you need.",
+                path.display(),
+                aside.display()
+            ))
+        } else {
+            Error::config(format!(
+                "{} could not be read ({reason}). Delete it to start from defaults.",
                 path.display()
             ))
-        })?;
-        Ok(config)
+        }
     }
 
     pub fn save(&self) -> Result<()> {
@@ -372,7 +396,23 @@ mod tests {
         let err = Config::load().unwrap_err();
         let message = format!("{err}");
         assert!(message.contains("config.json"), "names the file: {message}");
-        assert!(message.contains("Delete it"), "says what to do: {message}");
+
+        // Kept, where the defaults saved at the first change cannot reach it.
+        Config::default().save().unwrap();
+        let aside: Vec<PathBuf> = std::fs::read_dir(Config::path().parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("config.unreadable-"))
+            })
+            .collect();
+        assert_eq!(aside.len(), 1, "moved aside: {message}");
+        assert_eq!(std::fs::read_to_string(&aside[0]).unwrap(), "{ this is not json");
+        assert!(
+            message.contains(&aside[0].display().to_string()),
+            "says where it went: {message}"
+        );
     }
 
     #[test]
