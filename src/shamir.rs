@@ -154,8 +154,10 @@ impl Share {
             .join("")
     }
 
+    /// The header and the data, with room left for the checksum so that
+    /// adding it does not move the bytes and leave a copy behind.
     fn body(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(HEADER_LEN + self.data.len());
+        let mut out = Vec::with_capacity(HEADER_LEN + self.data.len() + CHECKSUM_LEN);
         out.push(self.version);
         out.push(self.threshold);
         out.push(self.index);
@@ -165,19 +167,24 @@ impl Share {
     }
 
     /// The share as written on paper: base32 in groups of four.
-    pub fn to_text(&self) -> String {
-        let mut blob = self.body();
-        let checksum = Sha256::digest(&blob);
+    ///
+    /// Built in buffers that wipe themselves, and in one piece: enough of
+    /// these together are the master password, and the copies made along the
+    /// way used to be freed as they were.
+    pub fn to_text(&self) -> Zeroizing<String> {
+        let mut blob = Zeroizing::new(self.body());
+        let checksum = Sha256::digest(blob.as_slice());
         blob.extend_from_slice(&checksum[..CHECKSUM_LEN]);
-        let encoded = base32_encode(&blob);
-        blob.zeroize();
+        let encoded = Zeroizing::new(base32_encode(&blob));
 
-        encoded
-            .as_bytes()
-            .chunks(4)
-            .map(|chunk| std::str::from_utf8(chunk).unwrap_or("").to_string())
-            .collect::<Vec<_>>()
-            .join("-")
+        let mut text = Zeroizing::new(String::with_capacity(encoded.len() + encoded.len() / 4));
+        for (position, character) in encoded.chars().enumerate() {
+            if position > 0 && position % 4 == 0 {
+                text.push('-');
+            }
+            text.push(character);
+        }
+        text
     }
 }
 
@@ -399,23 +406,36 @@ pub fn parse_share(text: &str) -> Result<Share> {
 
 /// Picks every share out of pasted text, ignoring everything else.
 ///
-/// People paste the whole printed card, headings and all. Scanning line by line
-/// and keeping what checksums is more useful than demanding one share, bare,
-/// per attempt.
+/// People paste the whole printed card, headings and all, so each line is
+/// tried on its own and kept if it checksums. A piece copied out by hand may
+/// run over several lines instead; a block of lines with no piece on any one
+/// of them is therefore tried once more as a whole.
 pub fn parse_shares(text: &str) -> Vec<Share> {
     let mut found: Vec<Share> = Vec::new();
-    for line in text.lines() {
-        let Ok(share) = parse_share(line) else {
-            continue;
-        };
+    let mut keep = |share: Share| {
         // The same card pasted twice is a slip, not a second share.
-        if found
+        let seen = found
             .iter()
-            .any(|s| s.index == share.index && s.set_id == share.set_id)
-        {
-            continue;
+            .any(|s| s.index == share.index && s.set_id == share.set_id);
+        if !seen {
+            found.push(share);
         }
-        found.push(share);
+    };
+
+    let lines: Vec<&str> = text.lines().collect();
+    for block in lines.split(|line| line.trim().is_empty()) {
+        let on_a_line: Vec<Share> = block
+            .iter()
+            .filter_map(|line| parse_share(line).ok())
+            .collect();
+        if on_a_line.is_empty() {
+            // Joined, the lines are a piece again, and wiped like one.
+            let joined = Zeroizing::new(block.concat());
+            if let Ok(share) = parse_share(&joined) {
+                keep(share);
+            }
+        }
+        on_a_line.into_iter().for_each(&mut keep);
     }
     found
 }
@@ -437,6 +457,34 @@ mod tests {
         let checksum = Sha256::digest(&body);
         body.extend_from_slice(&checksum[..CHECKSUM_LEN]);
         parse_share(&base32_encode(&body)).expect("a well-formed piece parses")
+    }
+
+    #[test]
+    fn a_piece_written_over_several_lines_is_still_read() {
+        // Copied out by hand, a piece does not stop where the line does.
+        let shares = split(SECRET, 2, 3).unwrap();
+        let wrapped = |share: &Share| {
+            let text = share.to_text();
+            let (first, second) = text.split_at(text.len() / 2);
+            format!("{first}\n{second}")
+        };
+        let pasted = format!(
+            "Recovery piece 1\n\n{}\n\n{}\n",
+            wrapped(&shares[0]),
+            shares[1].to_text().as_str()
+        );
+        let found = parse_shares(&pasted);
+        assert_eq!(found.len(), 2, "one wrapped, one on a line of its own");
+        assert_eq!(combine(&found).unwrap().as_slice(), SECRET);
+    }
+
+    #[test]
+    fn a_piece_is_written_in_groups_of_four() {
+        let text = split(SECRET, 2, 2).unwrap()[0].to_text();
+        let groups: Vec<&str> = text.split('-').collect();
+        assert!(groups.len() > 1);
+        assert!(groups[..groups.len() - 1].iter().all(|g| g.len() == 4), "{groups:?}");
+        assert!((1..=4).contains(&groups[groups.len() - 1].len()));
     }
 
     #[test]
@@ -637,7 +685,7 @@ mod tests {
     #[test]
     fn the_written_form_round_trips() {
         let shares = split(SECRET, 3, 5).unwrap();
-        let text: Vec<String> = shares.iter().map(|s| s.to_text()).collect();
+        let text: Vec<Zeroizing<String>> = shares.iter().map(Share::to_text).collect();
         let parsed: Vec<Share> = text.iter().map(|t| parse_share(t).unwrap()).collect();
         assert_eq!(combine(&parsed[..3]).unwrap().as_slice(), SECRET);
         for (original, round_tripped) in shares.iter().zip(&parsed) {
@@ -781,8 +829,8 @@ mod tests {
              {}\n\
              \n\
              Written 2026-09-22.\n",
-            shares[0].to_text(),
-            shares[1].to_text()
+            shares[0].to_text().as_str(),
+            shares[1].to_text().as_str()
         );
         let found = parse_shares(&card);
         assert_eq!(found.len(), 2, "both shares and nothing else");
@@ -793,7 +841,8 @@ mod tests {
     fn the_same_card_pasted_twice_counts_once() {
         let shares = split(SECRET, 2, 3).unwrap();
         let text = shares[0].to_text();
-        let pasted = format!("{text}\n{text}\n{}", shares[1].to_text());
+        let text = text.as_str();
+        let pasted = format!("{text}\n{text}\n{}", shares[1].to_text().as_str());
         let found = parse_shares(&pasted);
         assert_eq!(found.len(), 2);
     }

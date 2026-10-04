@@ -313,11 +313,11 @@ mod tests {
         let shares = crate::shamir::split(b"a master password", 2, 3).unwrap();
         let printed = format!(
             "Deep Defense recovery\n{}\n{}\n",
-            shares[0].to_text(),
-            shares[1].to_text()
+            shares[0].to_text().as_str(),
+            shares[1].to_text().as_str()
         );
         let corpus = vec![
-            shares[0].to_text().into_bytes(),
+            shares[0].to_text().as_bytes().to_vec(),
             printed.into_bytes(),
             b"AAAA-AAAA-AAAA".to_vec(),
             Vec::new(),

@@ -1583,7 +1583,7 @@ fn create_recovery_shares(app: &mut App) {
         }
 
         let shares = crate::shamir::split(typed.as_bytes(), threshold, count)?;
-        Ok(shares.iter().map(|s| Zeroizing::new(s.to_text())).collect())
+        Ok(shares.iter().map(crate::shamir::Share::to_text).collect())
     })();
 
     app.settings.recovery_password = Zeroizing::new(String::new());

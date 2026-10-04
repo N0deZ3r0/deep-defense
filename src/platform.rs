@@ -91,13 +91,21 @@ pub fn type_text(text: &str) -> crate::errors::Result<()> {
         return Ok(());
     }
     // Refused rather than merely discouraged: by the time the user sees what
-    // happened, the password is in a field they did not intend.
-    if let Some((_, ours)) = foreground_window() {
-        if ours {
+    // happened, the password is in a field they did not intend. And refused
+    // when nothing is in front at all — the keystrokes would still go
+    // somewhere, and nobody could say where.
+    match foreground_window() {
+        None => {
+            return Err(crate::errors::Error::format(
+                "there is no window in front to type into",
+            ))
+        }
+        Some((_, true)) => {
             return Err(crate::errors::Error::format(
                 "the window in front is this program's own",
-            ));
+            ))
         }
+        Some((_, false)) => {}
     }
 
     /// The keystrokes, which are the password one character at a time, wiped

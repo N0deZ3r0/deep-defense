@@ -419,6 +419,10 @@ impl App {
         self.password_input = Zeroizing::new(String::new());
         self.password_confirm = Zeroizing::new(String::new());
         self.generator_preview = Zeroizing::new(String::new());
+        // Pasted pieces are the master password in parts. They used to stay
+        // in the box, behind a closed panel, for as long as the program ran.
+        self.recovery_input = Zeroizing::new(String::new());
+        self.show_recovery_unlock = false;
         self.draft = None;
     }
 

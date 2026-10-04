@@ -374,17 +374,10 @@ pub fn combine_secret(password: &Secret, keyfiles: &[std::path::PathBuf]) -> Res
         return Ok(Secret::new(password.expose().to_vec()));
     }
 
-    let mut digests: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(keyfiles.len());
-    for path in keyfiles {
-        let data = Zeroizing::new(
-            std::fs::read(path).map_err(|e| Error::io(path.clone(), e))?,
-        );
-        // The digest stands in for the keyfile, so its temporary gets the
-        // same treatment as the keyfile's bytes.
-        let mut digest = Sha512::digest(&data);
-        digests.push(Zeroizing::new(digest.to_vec()));
-        digest.as_mut_slice().zeroize();
-    }
+    let mut digests = keyfiles
+        .iter()
+        .map(|path| keyfile_digest(path))
+        .collect::<Result<Vec<_>>>()?;
     // Sort the digests, not the paths, so the result does not depend on the
     // order the user happened to list their keyfiles in.
     digests.sort_by(|a, b| a.as_slice().cmp(b.as_slice()));
@@ -409,6 +402,34 @@ pub fn combine_secret(password: &Secret, keyfiles: &[std::path::PathBuf]) -> Res
     let secret = Secret::new(output.to_vec());
     output.as_mut_slice().zeroize();
     Ok(secret)
+}
+
+/// SHA-512 of a keyfile, read a piece at a time.
+///
+/// Any file can be named as a keyfile, and it used to be read whole: a film
+/// picked by mistake was several gigabytes of memory, and a process that died
+/// asking for them. The digest is the same either way.
+fn keyfile_digest(path: &std::path::Path) -> Result<Zeroizing<Vec<u8>>> {
+    use sha2::Digest;
+    use std::io::Read;
+
+    let unreadable = |e| Error::io(path.to_path_buf(), e);
+    let mut file = std::fs::File::open(path).map_err(unreadable)?;
+    let mut hasher = Sha512::new();
+    let mut piece = Zeroizing::new(vec![0u8; 64 * 1024]);
+    loop {
+        let read = file.read(&mut piece).map_err(unreadable)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&piece[..read]);
+    }
+    // The digest stands in for the keyfile, so its temporary gets the same
+    // treatment as the keyfile's bytes.
+    let mut digest = hasher.finalize();
+    let kept = Zeroizing::new(digest.to_vec());
+    digest.as_mut_slice().zeroize();
+    Ok(kept)
 }
 
 pub(crate) fn subkey(master_key: &Key, seed: &[u8], info: &[u8]) -> Result<Key> {

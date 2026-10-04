@@ -14,14 +14,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use crate::errors::{Error, Result};
+
+/// How often a busy clipboard is tried before giving up, and how long apart.
+const ATTEMPTS: u32 = 10;
+const BETWEEN_ATTEMPTS: Duration = Duration::from_millis(100);
 
 /// What we remember about a copy that is still waiting to be cleared.
 ///
 /// The digest, not the text: keeping a second copy of the password alive for
 /// the length of the timer would undo the point of the exercise.
-#[derive(Clone)]
 struct Pending {
     generation: u64,
     expires_at: Instant,
@@ -63,23 +67,36 @@ impl ClipboardManager {
         }
 
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let pending = Pending {
+        let digest: [u8; 32] = Sha256::digest(text.as_bytes()).into();
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pending {
             generation,
             expires_at: Instant::now() + Duration::from_secs(seconds),
-            digest: Sha256::digest(text.as_bytes()).into(),
-        };
-        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(pending.clone());
+            digest,
+        });
 
         let manager = self.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(seconds));
-            // A newer copy supersedes this timer: without the generation
-            // check, an old thread would wipe a freshly copied password.
-            if manager.generation.load(Ordering::SeqCst) == pending.generation {
-                manager.clear_if_ours(&pending.digest);
-            }
+            manager.expire(generation, &digest);
         });
         Ok(())
+    }
+
+    /// The timer for copy number `generation` has run out.
+    fn expire(&self, generation: u64, digest: &[u8; 32]) {
+        // A newer copy supersedes this timer: without the check, an old
+        // thread would wipe a freshly copied password.
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        clear_if_holds(digest);
+        // Only this copy's own record. One made while the clipboard was being
+        // cleared has a timer of its own and a countdown to show; forgetting
+        // it here left that password with nothing that would ever clear it.
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if pending.as_ref().is_some_and(|p| p.generation == generation) {
+            *pending = None;
+        }
     }
 
     /// Seconds left before the pending clear fires, for the UI countdown.
@@ -95,38 +112,56 @@ impl ClipboardManager {
 
     /// Clear immediately, whatever is pending.
     pub fn clear_now(&self) {
-        let digest = {
-            let guard = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            guard.as_ref().map(|p| p.digest)
-        };
-        match digest {
-            Some(digest) => self.clear_if_ours(&digest),
-            None => {
-                self.generation.fetch_add(1, Ordering::SeqCst);
-            }
+        // Whatever timer is still asleep has nothing left to do.
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(pending) = pending {
+            clear_if_holds(&pending.digest);
         }
-    }
-
-    fn clear_if_ours(&self, digest: &[u8; 32]) {
-        let Ok(mut clipboard) = open() else {
-            return;
-        };
-        // `get_text` fails when the clipboard holds a non-text format, which
-        // means the user has copied something else - nothing for us to clear.
-        if let Ok(current) = clipboard.get_text() {
-            // Read back, this is the password again; it is wiped like one.
-            let current = zeroize::Zeroizing::new(current);
-            let current_digest: [u8; 32] = Sha256::digest(current.as_bytes()).into();
-            if &current_digest == digest {
-                let _ = clipboard.clear();
-            }
-        }
-        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// True while a copied secret is still sitting on the clipboard.
     pub fn has_pending(&self) -> bool {
         self.seconds_remaining().is_some()
+    }
+}
+
+/// Clear the clipboard if what it holds hashes to `digest`.
+///
+/// Only then: blindly wiping it would destroy whatever the user copied in
+/// the meantime. And more than once if need be. Another program holding the
+/// clipboard open for a moment is ordinary on Windows — a clipboard manager,
+/// a remote-desktop session — and one failed attempt used to be the end of
+/// it: the timer had fired, nothing tried again, and the password stayed.
+fn clear_if_holds(digest: &[u8; 32]) {
+    for _ in 0..ATTEMPTS {
+        if try_clear(digest) {
+            return;
+        }
+        std::thread::sleep(BETWEEN_ATTEMPTS);
+    }
+}
+
+/// One attempt. `false` means the clipboard was busy, and worth another.
+fn try_clear(digest: &[u8; 32]) -> bool {
+    let Ok(mut clipboard) = arboard::Clipboard::new() else {
+        return false;
+    };
+    match clipboard.get_text() {
+        Ok(current) => {
+            // Read back, this is the password again; it is wiped like one.
+            let current = Zeroizing::new(current);
+            let held: [u8; 32] = Sha256::digest(current.as_bytes()).into();
+            held != *digest || clipboard.clear().is_ok()
+        }
+        Err(arboard::Error::ClipboardOccupied) => false,
+        // Anything else means it holds something that is not text: the user
+        // has copied something else, and that is not ours to clear.
+        Err(_) => true,
     }
 }
 
