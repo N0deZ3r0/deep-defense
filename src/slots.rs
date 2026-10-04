@@ -681,7 +681,7 @@ mod tests {
         let err = file
             .write_slot(PRIMARY_SLOT, &huge, &key, &salt)
             .unwrap_err();
-        assert!(err.to_string().contains("larger slot size"));
+        assert!(matches!(err, Error::Refused(Refusal::VaultFull { .. })));
     }
 
     #[test]

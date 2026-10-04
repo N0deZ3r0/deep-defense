@@ -415,7 +415,7 @@ mod tests {
         let csv = "col1,col2\nfoo,bar\n";
         let mut data = VaultData::default();
         let err = from_csv(&mut data, csv).unwrap_err();
-        assert!(err.to_string().contains("header"));
+        assert!(matches!(err, Error::Refused(Refusal::ImportNoNameColumn)));
     }
 
     #[test]

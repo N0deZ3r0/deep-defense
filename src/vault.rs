@@ -2054,7 +2054,7 @@ mod tests {
         let err = hidden
             .create_hidden(&Secret::from_str("third"))
             .unwrap_err();
-        assert!(err.to_string().contains("at most two"));
+        assert!(matches!(err, Error::Refused(Refusal::AlreadyHiddenVault)));
     }
 
     #[test]
@@ -2354,7 +2354,7 @@ mod tests {
         let err = vault
             .migrate_capacity(slots::MIN_SLOT_CAPACITY, None)
             .unwrap_err();
-        assert!(format!("{err}").contains("would not fit"));
+        assert!(matches!(err, Error::Refused(Refusal::WouldNotFit { .. })));
         // And the vault is untouched by the refusal.
         assert_eq!(vault.slot_capacity(), slots::MIN_SLOT_CAPACITY * 8);
         assert_eq!(vault.data.entries.len(), 1);
@@ -2523,7 +2523,7 @@ mod tests {
 
         let mut mine_vault = small_vault(&dir.vault(), &mine);
         let err = mine_vault.import_anchor(&carried).unwrap_err();
-        assert!(format!("{err}").contains("different vault"));
+        assert!(matches!(err, Error::Refused(Refusal::RecordOfAnotherVault)));
     }
 
     #[test]
@@ -2552,7 +2552,7 @@ mod tests {
             !matches!(err, Error::Rollback { .. }),
             "a forged anchor must be rejected outright, not believed"
         );
-        assert!(format!("{err}").contains("not written for this vault"));
+        assert!(matches!(err, Error::Refused(Refusal::RecordNotForThisPassword)));
     }
 
     #[test]
@@ -2655,7 +2655,7 @@ mod tests {
         let err = vault
             .rebuild(slots::MIN_SLOT_CAPACITY, stronger_params(), None, None)
             .unwrap_err();
-        assert!(format!("{err}").contains("needs the master password"));
+        assert!(matches!(err, Error::Refused(Refusal::WorkFactorNeedsPassword)));
         assert_eq!(vault.kdf().t_cost, params().t_cost, "nothing changed");
     }
 
@@ -2783,7 +2783,7 @@ mod tests {
         let err = vault
             .rebuild(slots::MIN_SLOT_CAPACITY, same, Some(&secret), None)
             .unwrap_err();
-        assert!(format!("{err}").contains("change nothing"));
+        assert!(matches!(err, Error::Refused(Refusal::NothingToChange)));
     }
 
     #[test]

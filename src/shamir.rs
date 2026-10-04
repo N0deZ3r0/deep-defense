@@ -678,7 +678,7 @@ mod tests {
     fn too_few_shares_are_refused() {
         let shares = split(SECRET, 3, 5).unwrap();
         let err = combine(&shares[..2]).unwrap_err();
-        assert!(format!("{err}").contains("not enough"));
+        assert!(matches!(err, Error::Refused(Refusal::TooFewPieces)));
         assert!(combine(&[]).is_err());
     }
 
@@ -688,14 +688,14 @@ mod tests {
         let b = split(SECRET, 2, 2).unwrap();
         let mixed = [a[0].clone(), b[1].clone()];
         let err = combine(&mixed).unwrap_err();
-        assert!(format!("{err}").contains("different splits"));
+        assert!(matches!(err, Error::Refused(Refusal::PiecesFromDifferentSets)));
     }
 
     #[test]
     fn the_same_share_twice_is_refused() {
         let shares = split(SECRET, 2, 3).unwrap();
         let err = combine(&[shares[0].clone(), shares[0].clone()]).unwrap_err();
-        assert!(format!("{err}").contains("twice"));
+        assert!(matches!(err, Error::Refused(Refusal::PieceGivenTwice)));
     }
 
     #[test]

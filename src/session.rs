@@ -1129,7 +1129,7 @@ mod tests {
         let err = create_vault(&absent, &config, &Secret::from_str("other"), 0)
             .err()
             .expect("must not clobber an existing vault");
-        assert!(err.to_string().contains("already exists"));
+        assert!(matches!(err, Error::Refused(Refusal::AlreadyExists(_))));
     }
 
     #[test]

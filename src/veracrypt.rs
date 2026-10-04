@@ -621,7 +621,7 @@ mod tests {
         let err = veracrypt
             .create_volume(&a_volume(&existing), &Secret::from_str("pw"))
             .unwrap_err();
-        assert!(err.to_string().contains("refusing to overwrite"));
+        assert!(matches!(err, Error::Refused(Refusal::WouldOverwrite(_))));
         // ...and the file is untouched.
         assert_eq!(std::fs::read(&existing).unwrap(), b"precious data");
 
