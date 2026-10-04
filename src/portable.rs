@@ -12,7 +12,7 @@ use std::path::Path;
 
 use zeroize::Zeroizing;
 
-use crate::errors::{Error, Result};
+use crate::errors::{Error, Refusal, Result};
 use crate::model::{Entry, VaultData};
 
 /// What an import did, for reporting back.
@@ -122,7 +122,7 @@ pub fn from_csv(data: &mut VaultData, text: &str) -> Result<ImportReport> {
     let rows = Cells(parse_csv(text));
     let rows = &rows.0;
     let Some(header) = rows.first() else {
-        return Err(Error::vault("the file is empty"));
+        return Err(Refusal::ImportEmpty.into());
     };
 
     let find = |names: &[&str]| -> Option<usize> {
@@ -141,10 +141,7 @@ pub fn from_csv(data: &mut VaultData, text: &str) -> Result<ImportReport> {
     let tags_at = find(&["tags", "group", "folder", "category"]);
 
     let Some(name_at) = name_at else {
-        return Err(Error::vault(
-            "no name column found. The first line must be a header with a \
-             \"name\" or \"title\" column.",
-        ));
+        return Err(Refusal::ImportNoNameColumn.into());
     };
 
     let mut report = ImportReport::default();
@@ -205,15 +202,16 @@ pub fn from_json(data: &mut VaultData, text: &str) -> Result<ImportReport> {
         entries: Vec<serde::de::IgnoredAny>,
     }
     if let Err(e) = serde_json::from_str::<Shape>(text) {
-        return Err(Error::vault(if e.is_data() {
-            "this is not a Deep Defense export: it has no \"entries\" list.".to_string()
+        let refusal = if e.is_data() {
+            Refusal::ExportHasNoEntries
         } else {
-            format!("this is not a Deep Defense export ({e})")
-        }));
+            Refusal::NotAnExport(e.to_string())
+        };
+        return Err(refusal.into());
     }
 
     let incoming: VaultData = serde_json::from_str(text)
-        .map_err(|e| Error::vault(format!("this is not a Deep Defense export ({e})")))?;
+        .map_err(|e| Refusal::NotAnExport(e.to_string()))?;
 
     let mut report = ImportReport::default();
     for entry in incoming.entries {

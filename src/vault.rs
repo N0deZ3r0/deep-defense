@@ -442,7 +442,7 @@ pub fn list_backups(vault_path: &Path) -> Vec<Backup> {
 /// Put backup `index` back as the vault file. Nothing may have the vault open.
 pub fn restore_backup(vault_path: &Path, index: usize) -> Result<()> {
     if !(1..=BACKUP_COUNT).contains(&index) {
-        return Err(Error::format("there is no backup with that number"));
+        return Err(Refusal::NoSuchBackup.into());
     }
     let source = backup_path_for(vault_path, index);
     let bytes = std::fs::read(&source).map_err(|e| Error::io(source.clone(), e))?;
@@ -594,12 +594,8 @@ impl Vault {
         let file = SlotFile::parse(&bytes)?;
         let (slot, opened) = file.open_any(secret)?;
 
-        let data: VaultData = serde_json::from_slice(&opened.payload).map_err(|e| {
-            Error::vault(format!(
-                "the vault decrypted correctly but its contents are unreadable ({e}). \
-                 Try one of the .bak files beside it."
-            ))
-        })?;
+        let data: VaultData = serde_json::from_slice(&opened.payload)
+            .map_err(|e| Refusal::ContentsUnreadable(e.to_string()))?;
 
         let mut vault = Self {
             path: path.to_path_buf(),
@@ -1103,20 +1099,18 @@ impl Vault {
     /// planted anchor cannot be used to make a current vault look rolled back.
     pub fn import_anchor(&mut self, path: &Path) -> Result<()> {
         let text = std::fs::read_to_string(path).map_err(|e| Error::io(path.to_path_buf(), e))?;
-        let anchor: Anchor = serde_json::from_str(&text)
-            .map_err(|e| Error::format(format!("that is not an anchor file ({e})")))?;
+        let anchor: Anchor =
+            serde_json::from_str(&text).map_err(|e| Refusal::NotARecord(e.to_string()))?;
 
         if anchor.vault_id != self.vault_id() {
-            return Err(Error::format("that anchor belongs to a different vault"));
+            return Err(Refusal::RecordOfAnotherVault.into());
         }
         let recorded = BASE64
             .decode(&anchor.mac)
-            .map_err(|_| Error::format("that anchor is damaged"))?;
+            .map_err(|_| Refusal::RecordDamaged)?;
         let expected = self.anchor_mac(anchor.revision)?;
         if !constant_time_eq(&expected, &recorded) {
-            return Err(Error::format(
-                "that anchor was not written for this vault by this password",
-            ));
+            return Err(Refusal::RecordNotForThisPassword.into());
         }
 
         if anchor.revision > self.data.revision {
@@ -1232,9 +1226,7 @@ impl Vault {
         // Mirroring onto the vault itself would rotate the real backups on
         // every save and, worse, look like it was working.
         if target == self.path {
-            return Err(Error::format(
-                "the mirror directory is where the vault already lives",
-            ));
+            return Err(Refusal::MirrorIsVaultDirectory.into());
         }
 
         std::fs::create_dir_all(directory)
@@ -1293,7 +1285,7 @@ impl Vault {
         let old_capacity = self.file.header.slot_capacity;
         let kdf_changed = new_kdf != self.file.header.kdf;
         if new_capacity == old_capacity && !kdf_changed {
-            return Err(Error::format("that would change nothing"));
+            return Err(Refusal::NothingToChange.into());
         }
         new_kdf.validate()?;
 
@@ -1301,19 +1293,17 @@ impl Vault {
         let payload = crate::secret::json_bytes(&self.data, false)
             .map_err(|e| Error::vault(format!("cannot serialise the vault: {e}")))?;
         if payload.len() > header.max_payload() {
-            return Err(Error::format(format!(
-                "this vault holds {} bytes and would not fit in the new size",
-                payload.len()
-            )));
+            return Err(Refusal::WouldNotFit {
+                holds: payload.len(),
+            }
+            .into());
         }
 
         // Work from the freshest copy on disk, not our snapshot of it.
         self.refresh_other_slots()?;
 
         let own = if kdf_changed {
-            let secret = own.ok_or_else(|| {
-                Error::format("changing the work factor needs the master password")
-            })?;
+            let secret = own.ok_or(Refusal::WorkFactorNeedsPassword)?;
             if !self.file.slot_opens(self.slot, secret) {
                 return Err(Error::Authentication);
             }
@@ -1331,9 +1321,7 @@ impl Vault {
             Some(secret) => {
                 let opened = self.file.open_slot(other_index, secret)?;
                 if opened.payload.len() > header.max_payload() {
-                    return Err(Error::format(
-                        "the other vault in this file would not fit in the new size",
-                    ));
+                    return Err(Refusal::OtherVaultWouldNotFit.into());
                 }
                 Some((opened, secret))
             }
@@ -1585,9 +1573,7 @@ impl Vault {
     /// left untouched on disk.
     pub fn create_hidden(&self, secret: &Secret) -> Result<Vault> {
         if self.is_hidden() {
-            return Err(Error::vault(
-                "this is already the hidden vault; a file holds at most two",
-            ));
+            return Err(Refusal::AlreadyHiddenVault.into());
         }
         // Under this vault's own password the new one could never be opened:
         // this slot would answer first, every time.
@@ -1670,12 +1656,7 @@ mod tests {
     }
 
     fn params() -> KdfParams {
-        KdfParams {
-            m_cost: KdfParams::MIN_M_COST,
-            t_cost: 2,
-            p_cost: 1,
-            algorithm: "argon2id".into(),
-        }
+        KdfParams::cheapest()
     }
 
     /// A vault with the smallest legal slot: the tests are about behaviour,

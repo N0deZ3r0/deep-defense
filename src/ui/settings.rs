@@ -2134,12 +2134,7 @@ mod tests {
         let mut vault = crate::vault::Vault::create_in_slot(
             &home.join("vault.ddv"),
             &Secret::from_str("import"),
-            KdfParams {
-                m_cost: KdfParams::MIN_M_COST,
-                t_cost: 2,
-                p_cost: 1,
-                algorithm: "argon2id".into(),
-            },
+            KdfParams::cheapest(),
             crate::slots::PRIMARY_SLOT,
             Some(crate::slots::MIN_SLOT_CAPACITY),
         )

@@ -31,7 +31,7 @@
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, KdfParams, SALT_LEN, SEED_LEN};
-use crate::errors::{Error, Result};
+use crate::errors::{Error, Refusal, Result};
 use crate::secret::{Key, Secret};
 
 /// Slots per file. Fixed, and deliberately not configurable: a file with an
@@ -145,9 +145,7 @@ impl SlotFile {
 
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < MAGIC.len() + 3 || &bytes[..MAGIC.len()] != MAGIC {
-            return Err(Error::format(
-                "this file is not a Deep Defense vault (wrong magic bytes)",
-            ));
+            return Err(Refusal::NotAVault.into());
         }
         let version = bytes[MAGIC.len()];
         if version != FORMAT_VERSION {
@@ -287,12 +285,11 @@ impl SlotFile {
             return Err(Error::format("slot salt is the wrong length"));
         }
         if payload.len() > self.header.max_payload() {
-            return Err(Error::vault(format!(
-                "this vault holds {} bytes, more than the {} a slot was created with. \
-                 Remove some attachments, or create a new vault with a larger slot size.",
-                payload.len(),
-                self.header.max_payload()
-            )));
+            return Err(Refusal::VaultFull {
+                holds: payload.len(),
+                room: self.header.max_payload(),
+            }
+            .into());
         }
 
         let mut seed = [0u8; SEED_LEN];
@@ -370,11 +367,7 @@ impl SlotFile {
     /// again anyway, and silently mixing them would destroy both.
     pub fn adopt_other_slots(&mut self, other: &SlotFile, keep: usize) -> Result<()> {
         if self.header_json != other.header_json {
-            return Err(Error::vault(
-                "the vault file on disk was replaced by a different one while this \
-                 vault was open. Close without saving and reopen it, or your changes \
-                 will overwrite the file that is there now.",
-            ));
+            return Err(Refusal::ReplacedWhileOpen.into());
         }
         for index in 0..SLOT_COUNT {
             if index != keep {
@@ -493,12 +486,7 @@ mod tests {
     }
 
     fn params() -> KdfParams {
-        KdfParams {
-            m_cost: KdfParams::MIN_M_COST,
-            t_cost: 2,
-            p_cost: 1,
-            algorithm: "argon2id".into(),
-        }
+        KdfParams::cheapest()
     }
 
     fn header() -> FileHeader {

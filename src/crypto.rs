@@ -229,6 +229,18 @@ impl KdfParams {
         self.m_cost / 1024
     }
 
+    /// The cheapest parameters the validator accepts: quick enough for a
+    /// test suite, and still a real derivation.
+    #[cfg(test)]
+    pub(crate) fn cheapest() -> Self {
+        Self {
+            m_cost: Self::MIN_M_COST,
+            t_cost: Self::MIN_T_COST,
+            p_cost: 1,
+            algorithm: default_algorithm(),
+        }
+    }
+
     /// Roughly how long one guess takes here, measured rather than assumed.
     pub fn measure(&self) -> Result<std::time::Duration> {
         let salt = [0x42u8; SALT_LEN];
@@ -655,12 +667,7 @@ mod tests {
 
     fn test_params() -> KdfParams {
         // Fast enough for a test suite, still above the validation floor.
-        KdfParams {
-            m_cost: KdfParams::MIN_M_COST,
-            t_cost: 2,
-            p_cost: 1,
-            algorithm: "argon2id".into(),
-        }
+        KdfParams::cheapest()
     }
 
     fn sealed(plaintext: &[u8], password: &str) -> (Vec<u8>, VaultHeader) {

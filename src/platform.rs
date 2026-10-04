@@ -95,16 +95,8 @@ pub fn type_text(text: &str) -> crate::errors::Result<()> {
     // when nothing is in front at all — the keystrokes would still go
     // somewhere, and nobody could say where.
     match foreground_window() {
-        None => {
-            return Err(crate::errors::Error::format(
-                "there is no window in front to type into",
-            ))
-        }
-        Some((_, true)) => {
-            return Err(crate::errors::Error::format(
-                "the window in front is this program's own",
-            ))
-        }
+        None => return Err(crate::errors::Refusal::NothingInFront.into()),
+        Some((_, true)) => return Err(crate::errors::Refusal::OwnWindowInFront.into()),
         Some((_, false)) => {}
     }
 
@@ -156,18 +148,14 @@ pub fn type_text(text: &str) -> crate::errors::Result<()> {
         )
     };
     if sent as usize != events.0.len() {
-        return Err(crate::errors::Error::format(
-            "the system refused the keystrokes; another program may be blocking input",
-        ));
+        return Err(crate::errors::Refusal::KeystrokesRefused.into());
     }
     Ok(())
 }
 
 #[cfg(not(windows))]
 pub fn type_text(_text: &str) -> crate::errors::Result<()> {
-    Err(crate::errors::Error::format(
-        "typing into another window is only implemented on Windows",
-    ))
+    Err(crate::errors::Refusal::TypingUnsupported.into())
 }
 
 // ------------------------------------------------------------ machine identity

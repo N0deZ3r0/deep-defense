@@ -92,9 +92,7 @@ impl ContainerMeta {
     /// prune the leftovers of an interrupted password change.
     pub fn unwrap_password(&self, secret: &Secret) -> Result<(Secret, usize)> {
         if self.wrapped.is_empty() {
-            return Err(Error::config(
-                "the container metadata holds no key material — it is corrupt",
-            ));
+            return Err(Refusal::ContainerKeyEmpty.into());
         }
         for (index, encoded) in self.wrapped.iter().enumerate() {
             let Ok(blob) = BASE64.decode(encoded) else {
@@ -161,13 +159,7 @@ impl ContainerMeta {
             let _ = meta.save(container);
             return Ok(meta.clone());
         }
-        Err(Error::config(format!(
-            "cannot find {}.\n\n\
-             This file holds the key needed to open the container. Without it — or the \
-             spare copy in the settings file — the container cannot be opened. Restore \
-             it from your backup.",
-            path.display()
-        )))
+        Err(Refusal::ContainerKeyMissing(path).into())
     }
 }
 
@@ -460,13 +452,10 @@ pub fn create_vault(
 fn create_standalone(config: &Config, password: &Secret) -> Result<OpenVault> {
     let path = &config.vault_path;
     if path.as_os_str().is_empty() {
-        return Err(Error::config("choose where to put the vault first"));
+        return Err(Refusal::ChooseVaultPath.into());
     }
     if path.exists() {
-        return Err(Error::config(format!(
-            "{} already exists. Pick a different name, or open it instead.",
-            path.display()
-        )));
+        return Err(Refusal::AlreadyExists(path.clone()).into());
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| Error::io(parent.to_path_buf(), e))?;
@@ -489,13 +478,10 @@ fn create_in_container(
 ) -> Result<OpenVault> {
     let container = config.container_path.clone();
     if container.as_os_str().is_empty() {
-        return Err(Error::config("choose where to put the container first"));
+        return Err(Refusal::ChooseContainerPath.into());
     }
     if container.exists() {
-        return Err(Error::config(format!(
-            "{} already exists. Pick a different name, or open it instead.",
-            container.display()
-        )));
+        return Err(Refusal::AlreadyExists(container).into());
     }
 
     let secret = crypto::combine_secret(password, &config.keyfiles)?;
@@ -607,10 +593,7 @@ fn unlock_standalone(
 ) -> Result<OpenVault> {
     let path = &config.vault_path;
     if !path.is_file() {
-        return Err(Error::config(format!(
-            "no vault at {}. Check the path in Settings.",
-            path.display()
-        )));
+        return Err(Refusal::NoVaultAt(path.clone()).into());
     }
     let secret = crypto::combine_secret(password, &config.keyfiles)?;
     let vault = open_vault_file(path, &secret, config, older)?;
@@ -628,10 +611,7 @@ fn unlock_in_container(
 ) -> Result<OpenVault> {
     let container = &config.container_path;
     if !container.is_file() {
-        return Err(Error::config(format!(
-            "no container at {}. Check the path in Settings.",
-            container.display()
-        )));
+        return Err(Refusal::NoContainerAt(container.clone()).into());
     }
 
     let secret = crypto::combine_secret(password, &config.keyfiles)?;
@@ -650,10 +630,7 @@ fn unlock_in_container(
     let vault_path = mount.path.join(VAULT_FILENAME);
     if !vault_path.is_file() {
         veracrypt.dismount(&mount, true);
-        return Err(Error::vault(format!(
-            "the container opened, but there is no {VAULT_FILENAME} inside it. \
-             This container was not created by Deep Defense."
-        )));
+        return Err(Refusal::ContainerHasNoVault.into());
     }
 
     let opened = open_then_prune(&mut meta, used, container, || {
@@ -758,12 +735,7 @@ mod tests {
     use super::*;
 
     fn params() -> KdfParams {
-        KdfParams {
-            m_cost: KdfParams::MIN_M_COST,
-            t_cost: 2,
-            p_cost: 1,
-            algorithm: "argon2id".into(),
-        }
+        KdfParams::cheapest()
     }
 
     /// A config wired for standalone use, pointing into a scratch directory.

@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use sha1::{Digest, Sha1};
 
 use crate::config::app_dir;
-use crate::errors::{Error, Result};
+use crate::errors::{Error, Refusal, Result};
 
 const MAGIC: &[u8; 8] = b"DDBLOOM1";
 const VERSION: u8 = 1;
@@ -333,7 +333,7 @@ impl Catalogue {
             .collect();
 
         if candidates.is_empty() {
-            return Err(Error::format("that file holds no passwords"));
+            return Err(Refusal::NoPasswordsInList.into());
         }
 
         let incoming = candidates.len() as u64;

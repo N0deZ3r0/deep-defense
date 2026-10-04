@@ -51,12 +51,7 @@ fn snapshot_dir() -> PathBuf {
 }
 
 fn params() -> KdfParams {
-    KdfParams {
-        m_cost: KdfParams::MIN_M_COST,
-        t_cost: 2,
-        p_cost: 1,
-        algorithm: "argon2id".into(),
-    }
+    KdfParams::cheapest()
 }
 
 /// An app on a scratch home, holding a standalone vault saved `saves` times.

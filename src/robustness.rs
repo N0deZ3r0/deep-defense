@@ -160,12 +160,7 @@ mod tests {
     use crate::slots::{self, FileHeader, SlotFile};
 
     fn params() -> KdfParams {
-        KdfParams {
-            m_cost: KdfParams::MIN_M_COST,
-            t_cost: 2,
-            p_cost: 1,
-            algorithm: "argon2id".into(),
-        }
+        KdfParams::cheapest()
     }
 
     fn a_vault_file() -> Vec<u8> {

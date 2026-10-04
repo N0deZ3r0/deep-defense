@@ -131,6 +131,171 @@ pub struct Strings {
     pub recovery: RecoveryText,
     pub breach: BreachText,
     pub backups: BackupsText,
+    pub refusals: RefusalText,
+}
+
+/// What the program says when it will not, or cannot, do what was asked.
+///
+/// One sentence for each `errors::Refusal`, said whole: nothing is put in
+/// front of it, and what it takes is listed above each.
+pub struct RefusalText {
+    pub not_open: &'static str,
+    pub not_a_vault: &'static str,
+    /// Filled with: holds, room.
+    pub vault_full: &'static str,
+    pub replaced_while_open: &'static str,
+    /// Filled with: detail.
+    pub contents_unreadable: &'static str,
+    pub no_such_backup: &'static str,
+    pub mirror_is_vault_directory: &'static str,
+    pub nothing_to_change: &'static str,
+    /// Filled with: holds.
+    pub would_not_fit: &'static str,
+    pub other_vault_would_not_fit: &'static str,
+    pub work_factor_needs_password: &'static str,
+    /// Filled with: detail.
+    pub not_a_record: &'static str,
+    pub record_of_another_vault: &'static str,
+    pub record_damaged: &'static str,
+    pub record_not_for_this_password: &'static str,
+    /// Filled with: path.
+    pub no_vault_at: &'static str,
+    /// Filled with: path.
+    pub no_container_at: &'static str,
+    /// Filled with: path.
+    pub already_exists: &'static str,
+    /// Filled with: path.
+    pub would_overwrite: &'static str,
+    pub choose_vault_path: &'static str,
+    pub choose_container_path: &'static str,
+    /// Filled with: path, reason, moved to.
+    pub settings_moved_aside: &'static str,
+    /// Filled with: path, reason.
+    pub settings_unreadable: &'static str,
+    /// Filled with: the vault's file name.
+    pub container_has_no_vault: &'static str,
+    /// Filled with: path.
+    pub container_key_missing: &'static str,
+    pub container_key_empty: &'static str,
+    pub vera_crypt_missing: &'static str,
+    pub vera_crypt_format_missing: &'static str,
+    pub mount_failed: &'static str,
+    pub no_drive_letter: &'static str,
+    /// Filled with: exit code, output.
+    pub container_not_created: &'static str,
+    pub no_pieces: &'static str,
+    pub too_few_pieces: &'static str,
+    pub piece_given_twice: &'static str,
+    pub pieces_from_different_sets: &'static str,
+    pub pieces_of_another_version: &'static str,
+    pub pieces_damaged: &'static str,
+    pub piece_too_short: &'static str,
+    pub piece_mistyped: &'static str,
+    pub pieces_not_a_password: &'static str,
+    pub nothing_to_split: &'static str,
+    pub threshold_too_low: &'static str,
+    pub fewer_pieces_than_threshold: &'static str,
+    pub too_many_pieces: &'static str,
+    pub import_empty: &'static str,
+    pub import_no_name_column: &'static str,
+    pub export_has_no_entries: &'static str,
+    /// Filled with: detail.
+    pub not_an_export: &'static str,
+    pub no_passwords_in_list: &'static str,
+    pub totp_empty: &'static str,
+    /// Filled with: character.
+    pub totp_bad_character: &'static str,
+    pub totp_unusable: &'static str,
+    pub totp_digits: &'static str,
+    pub totp_period: &'static str,
+    pub policy_too_short: &'static str,
+    pub policy_too_long: &'static str,
+    pub policy_no_classes: &'static str,
+    pub policy_shorter_than_classes: &'static str,
+    pub policy_unsatisfiable: &'static str,
+    /// Filled with: detail.
+    pub clipboard_busy: &'static str,
+    /// Filled with: detail.
+    pub clipboard_write: &'static str,
+    pub nothing_in_front: &'static str,
+    pub own_window_in_front: &'static str,
+    pub keystrokes_refused: &'static str,
+    pub typing_unsupported: &'static str,
+}
+
+impl RefusalText {
+    /// Every sentence by name, for the tests that hold the two languages to
+    /// each other.
+    #[cfg(test)]
+    fn all(&self) -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("not_open", self.not_open),
+            ("not_a_vault", self.not_a_vault),
+            ("vault_full", self.vault_full),
+            ("replaced_while_open", self.replaced_while_open),
+            ("contents_unreadable", self.contents_unreadable),
+            ("no_such_backup", self.no_such_backup),
+            ("mirror_is_vault_directory", self.mirror_is_vault_directory),
+            ("nothing_to_change", self.nothing_to_change),
+            ("would_not_fit", self.would_not_fit),
+            ("other_vault_would_not_fit", self.other_vault_would_not_fit),
+            ("work_factor_needs_password", self.work_factor_needs_password),
+            ("not_a_record", self.not_a_record),
+            ("record_of_another_vault", self.record_of_another_vault),
+            ("record_damaged", self.record_damaged),
+            ("record_not_for_this_password", self.record_not_for_this_password),
+            ("no_vault_at", self.no_vault_at),
+            ("no_container_at", self.no_container_at),
+            ("already_exists", self.already_exists),
+            ("would_overwrite", self.would_overwrite),
+            ("choose_vault_path", self.choose_vault_path),
+            ("choose_container_path", self.choose_container_path),
+            ("settings_moved_aside", self.settings_moved_aside),
+            ("settings_unreadable", self.settings_unreadable),
+            ("container_has_no_vault", self.container_has_no_vault),
+            ("container_key_missing", self.container_key_missing),
+            ("container_key_empty", self.container_key_empty),
+            ("vera_crypt_missing", self.vera_crypt_missing),
+            ("vera_crypt_format_missing", self.vera_crypt_format_missing),
+            ("mount_failed", self.mount_failed),
+            ("no_drive_letter", self.no_drive_letter),
+            ("container_not_created", self.container_not_created),
+            ("no_pieces", self.no_pieces),
+            ("too_few_pieces", self.too_few_pieces),
+            ("piece_given_twice", self.piece_given_twice),
+            ("pieces_from_different_sets", self.pieces_from_different_sets),
+            ("pieces_of_another_version", self.pieces_of_another_version),
+            ("pieces_damaged", self.pieces_damaged),
+            ("piece_too_short", self.piece_too_short),
+            ("piece_mistyped", self.piece_mistyped),
+            ("pieces_not_a_password", self.pieces_not_a_password),
+            ("nothing_to_split", self.nothing_to_split),
+            ("threshold_too_low", self.threshold_too_low),
+            ("fewer_pieces_than_threshold", self.fewer_pieces_than_threshold),
+            ("too_many_pieces", self.too_many_pieces),
+            ("import_empty", self.import_empty),
+            ("import_no_name_column", self.import_no_name_column),
+            ("export_has_no_entries", self.export_has_no_entries),
+            ("not_an_export", self.not_an_export),
+            ("no_passwords_in_list", self.no_passwords_in_list),
+            ("totp_empty", self.totp_empty),
+            ("totp_bad_character", self.totp_bad_character),
+            ("totp_unusable", self.totp_unusable),
+            ("totp_digits", self.totp_digits),
+            ("totp_period", self.totp_period),
+            ("policy_too_short", self.policy_too_short),
+            ("policy_too_long", self.policy_too_long),
+            ("policy_no_classes", self.policy_no_classes),
+            ("policy_shorter_than_classes", self.policy_shorter_than_classes),
+            ("policy_unsatisfiable", self.policy_unsatisfiable),
+            ("clipboard_busy", self.clipboard_busy),
+            ("clipboard_write", self.clipboard_write),
+            ("nothing_in_front", self.nothing_in_front),
+            ("own_window_in_front", self.own_window_in_front),
+            ("keystrokes_refused", self.keystrokes_refused),
+            ("typing_unsupported", self.typing_unsupported),
+        ]
+    }
 }
 
 pub struct BackupsText {
@@ -316,11 +481,6 @@ pub struct ErrorsText {
     pub copy_mirror: &'static str,
     /// "{}" a path, "{}" the operating system's own message.
     pub io: &'static str,
-    pub not_open: &'static str,
-    /// "{}" the settings file, "{}" what is wrong with it, "{}" where it went.
-    pub settings_moved: &'static str,
-    /// "{}" the settings file, "{}" what is wrong with it.
-    pub settings_unreadable: &'static str,
 }
 pub struct AttachmentsText {
     pub section: &'static str,
@@ -1108,10 +1268,101 @@ pub static EN: Strings = Strings {
         copy_backup: "backup {} beside the vault",
         copy_mirror: "the copy in the mirror ({})",
         io: "{}: {}",
+    },
+
+    refusals: RefusalText {
         not_open: "The vault is not open.",
-        settings_moved: "{} could not be read ({}). It was moved to {}, and the settings \
-                         start from their defaults; copy back from it anything you need.",
+        not_a_vault: "This file is not a Deep Defense vault.",
+        vault_full: "This vault holds {} bytes, more than the {} its slot was created with. \
+                     Remove some attachments, or give the vault a larger slot size in \
+                     Settings.",
+        replaced_while_open: "The vault file on disk was replaced by a different one while \
+                              this vault was open. Lock and reopen it, or your changes would \
+                              overwrite the file that is there now.",
+        contents_unreadable: "The vault decrypted correctly, but its contents are unreadable \
+                              ({}). Try one of the backups beside it.",
+        no_such_backup: "There is no backup with that number.",
+        mirror_is_vault_directory: "The mirror directory is where the vault already lives.",
+        nothing_to_change: "That would change nothing.",
+        would_not_fit: "This vault holds {} bytes and would not fit in the new size.",
+        other_vault_would_not_fit: "The other vault in this file would not fit in the new \
+                                    size.",
+        work_factor_needs_password: "Changing the work factor needs the master password.",
+        not_a_record: "That is not a rollback record ({}).",
+        record_of_another_vault: "That record belongs to a different vault.",
+        record_damaged: "That record is damaged.",
+        record_not_for_this_password: "That record was not written for this vault under this \
+                                       password.",
+        no_vault_at: "There is no vault at {}. Check the path in Settings.",
+        no_container_at: "There is no container at {}. Check the path in Settings.",
+        already_exists: "{} already exists. Pick a different name, or open it instead.",
+        would_overwrite: "{} already exists; refusing to overwrite an existing file.",
+        choose_vault_path: "Choose where to put the vault first.",
+        choose_container_path: "Choose where to put the container first.",
+        settings_moved_aside: "{} could not be read ({}). It was moved to {}, and the \
+                               settings start from their defaults; copy back from it anything \
+                               you need.",
         settings_unreadable: "{} could not be read ({}). Delete it to start from defaults.",
+        container_has_no_vault: "The container opened, but there is no {} inside it. This \
+                                 container was not created by Deep Defense.",
+        container_key_missing: "Cannot find {}.\n\nThis file holds the key needed to open the \
+                                container. Without it — or the spare copy in the settings \
+                                file — the container cannot be opened. Restore it from your \
+                                backup.",
+        container_key_empty: "The container's key file holds no key material — it is corrupt.",
+        vera_crypt_missing: "VeraCrypt was not found on this system.\n\nInstall it from \
+                             https://www.veracrypt.fr and restart Deep Defense. If it is \
+                             installed in an unusual location, set the path in Settings.",
+        vera_crypt_format_missing: "\"VeraCrypt Format\" was not found next to VeraCrypt.",
+        mount_failed: "Could not mount the container.\n\nThe usual causes are a wrong \
+                       password, wrong or missing keyfiles, a wrong PIM, or the container \
+                       already being mounted elsewhere.",
+        no_drive_letter: "Every drive letter is in use — free one and try again.",
+        container_not_created: "The container was not created (exit code {}).\n{}",
+        no_pieces: "No recovery pieces were given.",
+        too_few_pieces: "There are not enough pieces to rebuild the password.",
+        piece_given_twice: "The same piece was given twice.",
+        pieces_from_different_sets: "These pieces come from different sets, and only pieces \
+                                     of one set combine.",
+        pieces_of_another_version: "These pieces were made by another version of the program.",
+        pieces_damaged: "These pieces do not fit together: one of them is damaged.",
+        piece_too_short: "That is too short to be a recovery piece.",
+        piece_mistyped: "That piece did not check out — a character is probably wrong.",
+        pieces_not_a_password: "The pieces combined, but not into a password — one of them is \
+                                probably from another set.",
+        nothing_to_split: "There is nothing to split.",
+        threshold_too_low: "A threshold below two would make every piece a copy of the \
+                            password.",
+        fewer_pieces_than_threshold: "Fewer pieces than the threshold could never be \
+                                      combined.",
+        too_many_pieces: "That is too many pieces.",
+        import_empty: "The file is empty.",
+        import_no_name_column: "No name column found. The first line must be a header with a \
+                                \"name\" or \"title\" column.",
+        export_has_no_entries: "This is not a Deep Defense export: it has no \"entries\" \
+                                list.",
+        not_an_export: "This is not a Deep Defense export ({}).",
+        no_passwords_in_list: "That file holds no passwords.",
+        totp_empty: "No two-factor secret was given.",
+        totp_bad_character: "\"{}\" is not a valid base32 character — check the secret.",
+        totp_unusable: "The two-factor secret is not a usable key.",
+        totp_digits: "Two-factor codes must have between 6 and 10 digits.",
+        totp_period: "The two-factor period must be between 5 and 300 seconds.",
+        policy_too_short: "A generated password must be at least 8 characters.",
+        policy_too_long: "A generated password must be at most 512 characters.",
+        policy_no_classes: "Enable at least one character class.",
+        policy_shorter_than_classes: "The password is too short to hold one character from \
+                                      each class.",
+        policy_unsatisfiable: "Could not satisfy the password policy — loosen it or increase \
+                               the length.",
+        clipboard_busy: "Cannot reach the system clipboard: {}. Another application may be \
+                         holding it open.",
+        clipboard_write: "Cannot write to the clipboard: {}",
+        nothing_in_front: "There is no window in front to type into.",
+        own_window_in_front: "The window in front is this program's own.",
+        keystrokes_refused: "The system refused the keystrokes; another program may be \
+                             blocking input.",
+        typing_unsupported: "Typing into another window is only implemented on Windows.",
     },
 
     portable: PortableText {
@@ -1706,11 +1957,101 @@ pub static RU: Strings = Strings {
         copy_backup: "резервная копия № {} рядом с хранилищем",
         copy_mirror: "копия в зеркале ({})",
         io: "{}: {}",
+    },
+
+    refusals: RefusalText {
         not_open: "Хранилище не открыто.",
-        settings_moved: "Не удалось прочитать {} ({}). Файл перемещён в {}, а настройки начаты \
-                         с исходных; перенесите из него всё, что нужно.",
+        not_a_vault: "Этот файл — не хранилище Deep Defense.",
+        vault_full: "В хранилище {} байт — больше, чем {} байт, на которые рассчитан его \
+                     слот. Удалите часть вложений или увеличьте размер слота в настройках.",
+        replaced_while_open: "Пока это хранилище было открыто, файл на диске заменили другим. \
+                              Заблокируйте хранилище и откройте заново, иначе ваши изменения \
+                              перезапишут файл, который лежит там сейчас.",
+        contents_unreadable: "Хранилище расшифровано верно, но его содержимое не читается \
+                              ({}). Попробуйте одну из резервных копий рядом с ним.",
+        no_such_backup: "Резервной копии с таким номером нет.",
+        mirror_is_vault_directory: "Папка зеркала — та самая, где уже лежит хранилище.",
+        nothing_to_change: "Это ничего не изменит.",
+        would_not_fit: "В хранилище {} байт — в новый размер оно не поместится.",
+        other_vault_would_not_fit: "Второе хранилище в этом файле не поместится в новый \
+                                    размер.",
+        work_factor_needs_password: "Чтобы изменить стоимость подбора, нужен мастер-пароль.",
+        not_a_record: "Это не запись об откате ({}).",
+        record_of_another_vault: "Эта запись относится к другому хранилищу.",
+        record_damaged: "Эта запись повреждена.",
+        record_not_for_this_password: "Эта запись сделана не для этого хранилища с этим \
+                                       паролем.",
+        no_vault_at: "По пути {} хранилища нет. Проверьте путь в настройках.",
+        no_container_at: "По пути {} контейнера нет. Проверьте путь в настройках.",
+        already_exists: "{} уже существует. Выберите другое имя или откройте его.",
+        would_overwrite: "{} уже существует; существующий файл не перезаписывается.",
+        choose_vault_path: "Сначала выберите, где будет лежать хранилище.",
+        choose_container_path: "Сначала выберите, где будет лежать контейнер.",
+        settings_moved_aside: "Не удалось прочитать {} ({}). Файл перемещён в {}, а настройки \
+                               начаты с исходных; перенесите из него всё, что нужно.",
         settings_unreadable: "Не удалось прочитать {} ({}). Удалите его, чтобы начать с \
                               исходных настроек.",
+        container_has_no_vault: "Контейнер открылся, но файла {} в нём нет. Этот контейнер \
+                                 создан не Deep Defense.",
+        container_key_missing: "Не найден файл {}.\n\nВ нём ключ, без которого контейнер не \
+                                открыть. Без него — или без запасной копии в файле настроек — \
+                                контейнер открыть нельзя. Восстановите его из резервной \
+                                копии.",
+        container_key_empty: "В файле ключа контейнера нет ключевого материала — он \
+                              повреждён.",
+        vera_crypt_missing: "VeraCrypt не найден на этом компьютере.\n\nУстановите его с \
+                             https://www.veracrypt.fr и перезапустите Deep Defense. Если он \
+                             установлен в необычном месте, укажите путь в настройках.",
+        vera_crypt_format_missing: "Рядом с VeraCrypt не найдена программа «VeraCrypt \
+                                    Format».",
+        mount_failed: "Не удалось подключить контейнер.\n\nОбычные причины: неверный пароль, \
+                       неверные или отсутствующие файлы-ключи, неверный PIM либо контейнер \
+                       уже подключён где-то ещё.",
+        no_drive_letter: "Все буквы дисков заняты — освободите одну и попробуйте снова.",
+        container_not_created: "Контейнер не создан (код завершения {}).\n{}",
+        no_pieces: "Не указано ни одной части.",
+        too_few_pieces: "Частей недостаточно, чтобы восстановить пароль.",
+        piece_given_twice: "Одна и та же часть указана дважды.",
+        pieces_from_different_sets: "Эти части из разных наборов, а складываются только части \
+                                     одного набора.",
+        pieces_of_another_version: "Эти части созданы другой версией программы.",
+        pieces_damaged: "Эти части не сходятся друг с другом: одна из них повреждена.",
+        piece_too_short: "Слишком коротко для части восстановления.",
+        piece_mistyped: "Эта часть не прошла проверку — скорее всего, ошибка в одном из \
+                         символов.",
+        pieces_not_a_password: "Части сложились, но не в пароль — скорее всего, одна из них \
+                                из другого набора.",
+        nothing_to_split: "Делить нечего.",
+        threshold_too_low: "При пороге меньше двух каждая часть была бы копией пароля.",
+        fewer_pieces_than_threshold: "Если частей меньше порога, собрать их не получится \
+                                      никогда.",
+        too_many_pieces: "Слишком много частей.",
+        import_empty: "Файл пуст.",
+        import_no_name_column: "Не найден столбец с названием. Первая строка должна быть \
+                                заголовком со столбцом «name» или «title».",
+        export_has_no_entries: "Это не экспорт Deep Defense: в нём нет списка «entries».",
+        not_an_export: "Это не экспорт Deep Defense ({}).",
+        no_passwords_in_list: "В этом файле нет паролей.",
+        totp_empty: "Секрет двухфакторной аутентификации не указан.",
+        totp_bad_character: "«{}» — недопустимый символ base32; проверьте секрет.",
+        totp_unusable: "Секрет двухфакторной аутентификации не годится в качестве ключа.",
+        totp_digits: "В коде двухфакторной аутентификации должно быть от 6 до 10 цифр.",
+        totp_period: "Период обновления кода должен быть от 5 до 300 секунд.",
+        policy_too_short: "Сгенерированный пароль должен быть не короче 8 символов.",
+        policy_too_long: "Сгенерированный пароль должен быть не длиннее 512 символов.",
+        policy_no_classes: "Включите хотя бы один набор символов.",
+        policy_shorter_than_classes: "Пароль слишком короткий, чтобы вместить по символу из \
+                                      каждого набора.",
+        policy_unsatisfiable: "Не удалось выполнить требования к паролю — ослабьте их или \
+                               увеличьте длину.",
+        clipboard_busy: "Нет доступа к буферу обмена: {}. Возможно, его удерживает другая \
+                         программа.",
+        clipboard_write: "Не удалось записать в буфер обмена: {}",
+        nothing_in_front: "Впереди нет окна, в которое можно печатать.",
+        own_window_in_front: "Впереди окно самой программы.",
+        keystrokes_refused: "Система отклонила нажатия клавиш; возможно, ввод блокирует \
+                             другая программа.",
+        typing_unsupported: "Ввод в чужое окно реализован только для Windows.",
     },
 
     portable: PortableText {
@@ -1877,7 +2218,7 @@ mod tests {
     fn placeholders_match_between_languages() {
         // A translation that drops a "{}" silently loses the number it was
         // supposed to show, and one that adds an extra leaves "{}" on screen.
-        let pairs: [(&str, &str, &str); 55] = [
+        let pairs: [(&str, &str, &str); 53] = [
             ("shell.locks_in", EN.shell.locks_in, RU.shell.locks_in),
             (
                 "shell.clipboard_clears_in",
@@ -1939,18 +2280,32 @@ mod tests {
             ("errors.copy_mirror", EN.errors.copy_mirror, RU.errors.copy_mirror),
             ("shell.newer_body", EN.shell.newer_body, RU.shell.newer_body),
             ("entry.unsaved_body", EN.entry.unsaved_body, RU.entry.unsaved_body),
-            ("errors.settings_moved", EN.errors.settings_moved, RU.errors.settings_moved),
-            (
-                "errors.settings_unreadable",
-                EN.errors.settings_unreadable,
-                RU.errors.settings_unreadable,
-            ),
         ];
         for (name, en, ru) in pairs {
             assert_eq!(
                 en.matches("{}").count(),
                 ru.matches("{}").count(),
                 "{name}: placeholder count differs between English and Russian"
+            );
+        }
+    }
+
+    #[test]
+    fn every_refusal_is_said_in_both_languages() {
+        // The same checks as above, over every refusal there is: the list
+        // comes from the struct itself, so a new one cannot be left out.
+        let (english, russian) = (EN.refusals.all(), RU.refusals.all());
+        assert_eq!(english.len(), russian.len());
+        for ((name, en), (_, ru)) in english.into_iter().zip(russian) {
+            assert!(!en.trim().is_empty() && !ru.trim().is_empty(), "{name} is empty");
+            assert_eq!(
+                en.matches("{}").count(),
+                ru.matches("{}").count(),
+                "{name}: placeholder count differs between English and Russian"
+            );
+            assert!(
+                ru.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c)),
+                "{name} is not in Russian: {ru}"
             );
         }
     }

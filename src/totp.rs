@@ -12,7 +12,7 @@ use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 use zeroize::Zeroizing;
 
-use crate::errors::{Error, Result};
+use crate::errors::{Error, Refusal, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Algorithm {
@@ -60,7 +60,7 @@ impl TotpConfig {
     pub fn parse(input: &str) -> Result<Self> {
         let input = input.trim();
         if input.is_empty() {
-            return Err(Error::vault("no TOTP secret given"));
+            return Err(Refusal::TotpEmpty.into());
         }
         if input.to_ascii_lowercase().starts_with("otpauth://") {
             return Self::parse_uri(input);
@@ -95,16 +95,14 @@ impl TotpConfig {
 
     pub fn validate(&self) -> Result<()> {
         if self.secret_base32.is_empty() {
-            return Err(Error::vault("the TOTP secret is empty"));
+            return Err(Refusal::TotpEmpty.into());
         }
         decode_base32(&self.secret_base32)?;
         if !(6..=10).contains(&self.digits) {
-            return Err(Error::vault("TOTP codes must have between 6 and 10 digits"));
+            return Err(Refusal::TotpDigits.into());
         }
         if !(5..=300).contains(&self.period) {
-            return Err(Error::vault(
-                "the TOTP period must be between 5 and 300 seconds",
-            ));
+            return Err(Refusal::TotpPeriod.into());
         }
         Ok(())
     }
@@ -138,7 +136,7 @@ where
     Hmac<D>: KeyInit + Mac,
 {
     let mut mac = <Hmac<D> as KeyInit>::new_from_slice(secret)
-        .map_err(|_| Error::vault("the TOTP secret is not a usable key"))?;
+        .map_err(|_| Refusal::TotpUnusable)?;
     mac.update(&counter.to_be_bytes());
     Ok(Zeroizing::new(mac.finalize().into_bytes().to_vec()))
 }
@@ -181,11 +179,12 @@ pub fn decode_base32(input: &str) -> Result<Zeroizing<Vec<u8>>> {
         if c == '=' {
             continue;
         }
-        let upper = c.to_ascii_uppercase() as u8;
-        let Some(value) = ALPHABET.iter().position(|a| *a == upper) else {
-            return Err(Error::vault(format!(
-                "\"{c}\" is not a valid base32 character — check the secret"
-            )));
+        // Asked of the character, not of its low byte: cast to a byte, "Ł"
+        // is U+0141 with the 01 dropped, which is "A", and a secret typed
+        // with one in it decoded without complaint to the wrong key.
+        let upper = c.to_ascii_uppercase();
+        let Some(value) = ALPHABET.iter().position(|a| char::from(*a) == upper) else {
+            return Err(Refusal::TotpBadCharacter(c).into());
         };
         buffer = (buffer << 5) | value as u32;
         bits += 5;
@@ -196,7 +195,7 @@ pub fn decode_base32(input: &str) -> Result<Zeroizing<Vec<u8>>> {
     }
 
     if output.is_empty() {
-        return Err(Error::vault("the TOTP secret decodes to nothing"));
+        return Err(Refusal::TotpEmpty.into());
     }
     Ok(output)
 }
@@ -268,6 +267,16 @@ mod tests {
         assert_eq!(config.secret_base32, "JBSWY3DPEHPK3PXP");
         assert_eq!(config.digits, 6);
         assert_eq!(config.period, 30);
+    }
+
+    #[test]
+    fn a_letter_from_another_alphabet_is_not_taken_for_one_of_these() {
+        // U+0141 and U+0142 end in the bytes for "A" and "B".
+        for typed in ["JBSWY3DPEHPK3PXŁ", "ł2345672"] {
+            let err = decode_base32(typed).expect_err("not base32");
+            assert!(matches!(err, Error::Refused(Refusal::TotpBadCharacter(_))), "{typed}");
+        }
+        assert!(decode_base32("JBSWY3DPEHPK3PXP").is_ok());
     }
 
     #[test]

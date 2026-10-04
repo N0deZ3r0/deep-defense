@@ -224,13 +224,17 @@ impl Config {
     fn set_aside(path: &Path, reason: &str) -> Error {
         let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
         let aside = path.with_file_name(format!("config.unreadable-{stamp}.json"));
-        let moved_to = std::fs::rename(path, &aside).is_ok().then_some(aside);
-        Refusal::SettingsUnreadable {
-            path: path.to_path_buf(),
-            reason: reason.to_string(),
-            moved_to,
+        let (path, reason) = (path.to_path_buf(), reason.to_string());
+        if std::fs::rename(&path, &aside).is_ok() {
+            Refusal::SettingsMovedAside {
+                path,
+                reason,
+                moved_to: aside,
+            }
+            .into()
+        } else {
+            Refusal::SettingsUnreadable { path, reason }.into()
         }
-        .into()
     }
 
     pub fn save(&self) -> Result<()> {

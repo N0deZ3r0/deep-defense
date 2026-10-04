@@ -56,48 +56,286 @@ pub enum Error {
 /// refusal it was asks the type, not the sentence.
 #[derive(Debug)]
 pub enum Refusal {
+    // The vault.
     /// Something needed the vault open, and it is locked.
     NotOpen,
     /// An entry was to be saved without a name to find it by.
     EntryNeedsName,
-    /// A hidden vault was asked for under the password of the vault it would
-    /// sit behind, where no unlock could ever reach it.
+    /// The file chosen is not one this program wrote.
+    NotAVault,
+    /// The vault no longer fits in the slot its file was made with.
+    VaultFull {
+        holds: usize,
+        room: usize,
+    },
+    /// The file on disk is no longer the one this vault was opened from.
+    ReplacedWhileOpen,
+    /// The slot decrypted, and what came out is not a vault.
+    ContentsUnreadable(String),
+    /// A backup was asked for by a number none of them has.
+    NoSuchBackup,
+    /// The mirror was pointed at the vault's own directory.
+    MirrorIsVaultDirectory,
+
+    // Two vaults in one file.
+    /// A hidden vault was asked for from inside the hidden vault.
+    AlreadyHiddenVault,
+    /// A hidden vault was asked for under the password of the vault it would sit
+    /// behind, where no unlock could ever reach it.
     HiddenSamePassword,
     /// A hidden vault already answers to that password.
     HiddenExists,
     /// The new master password already opens the other vault in the file.
     PasswordOpensOther,
-    /// The settings file would not parse. `moved_to` is where it was put, out
-    /// of the way of the defaults that are saved next.
+
+    // Rebuilding the file.
+    /// A rebuild was asked for with the size and cost the file already has.
+    NothingToChange,
+    /// The vault is larger than the slot size asked for.
+    WouldNotFit {
+        holds: usize,
+    },
+    /// The vault in the other slot is larger than the size asked for.
+    OtherVaultWouldNotFit,
+    /// A new work factor means a new key, which means the password.
+    WorkFactorNeedsPassword,
+
+    // The rollback record.
+    /// The file offered as a rollback record does not parse as one.
+    NotARecord(String),
+    /// The record names a different vault.
+    RecordOfAnotherVault,
+    /// The record's authentication tag is not even well formed.
+    RecordDamaged,
+    /// The record does not authenticate under this vault's key.
+    RecordNotForThisPassword,
+
+    // Where things are.
+    /// The configured vault file is not there.
+    NoVaultAt(PathBuf),
+    /// The configured container is not there.
+    NoContainerAt(PathBuf),
+    /// A new vault or container was to be made where a file already is.
+    AlreadyExists(PathBuf),
+    /// A file was to be written where one already is, and is left alone.
+    WouldOverwrite(PathBuf),
+    /// A vault was to be created with nowhere to put it.
+    ChooseVaultPath,
+    /// A container was to be created with nowhere to put it.
+    ChooseContainerPath,
+    /// The settings file would not parse, and was put out of the way of the
+    /// defaults that are saved next.
+    SettingsMovedAside {
+        path: PathBuf,
+        reason: String,
+        moved_to: PathBuf,
+    },
+    /// The settings file would not parse, and could not be moved either.
     SettingsUnreadable {
         path: PathBuf,
         reason: String,
-        moved_to: Option<PathBuf>,
     },
+
+    // The container.
+    /// The volume mounted, and there is no vault file on it.
+    ContainerHasNoVault,
+    /// Neither the sidecar nor its copy in the settings is there.
+    ContainerKeyMissing(PathBuf),
+    /// The sidecar parsed, and holds no wrapping at all.
+    ContainerKeyEmpty,
+    /// The container layer was asked for and VeraCrypt is not installed.
+    VeraCryptMissing,
+    /// VeraCrypt is there, and the tool that makes volumes is not.
+    VeraCryptFormatMissing,
+    /// The volume never appeared after VeraCrypt was asked to mount it.
+    MountFailed,
+    /// There is no letter left to mount a volume under.
+    NoDriveLetter,
+    /// VeraCrypt Format ran, and left no container behind.
+    ContainerNotCreated {
+        exit_code: String,
+        output: String,
+    },
+
+    // Recovery pieces.
+    /// Pieces were to be combined, and none were given.
+    NoPieces,
+    /// Fewer pieces than the set needs.
+    TooFewPieces,
+    /// The same piece counted as two.
+    PieceGivenTwice,
+    /// Pieces of more than one split, which share nothing.
+    PiecesFromDifferentSets,
+    /// Pieces in a format this build does not read.
+    PiecesOfAnotherVersion,
+    /// Pieces that pass their own checksum and cannot belong together.
+    PiecesDamaged,
+    /// Too little text to hold a piece.
+    PieceTooShort,
+    /// A piece whose checksum does not match what was typed.
+    PieceMistyped,
+    /// The pieces combined into something that is not text.
+    PiecesNotAPassword,
+    /// An empty secret was to be split.
+    NothingToSplit,
+    /// A threshold of one, which is no threshold.
+    ThresholdTooLow,
+    /// More pieces needed than would be made.
+    FewerPiecesThanThreshold,
+    /// More pieces than anyone copies out by hand.
+    TooManyPieces,
+
+    // Import.
+    /// A file to import with nothing in it.
+    ImportEmpty,
+    /// A CSV whose first line names no column to call entries by.
+    ImportNoNameColumn,
+    /// A JSON file that is not this program's export.
+    ExportHasNoEntries,
+    /// A file that does not parse as this program's export.
+    NotAnExport(String),
+    /// A wordlist with no words in it.
+    NoPasswordsInList,
+
+    // The authenticator.
+    /// No authenticator secret, or one that decodes to nothing.
+    TotpEmpty,
+    /// A character base32 does not have.
+    TotpBadCharacter(char),
+    /// A secret the code generator would not take as a key.
+    TotpUnusable,
+    /// A code length no authenticator uses.
+    TotpDigits,
+    /// A code lifetime outside anything sensible.
+    TotpPeriod,
+
+    // The generator.
+    /// A generated password shorter than is worth generating.
+    PolicyTooShort,
+    /// A generated password longer than anything accepts.
+    PolicyTooLong,
+    /// Every kind of character switched off.
+    PolicyNoClasses,
+    /// One of each kind was asked for in fewer characters than kinds.
+    PolicyShorterThanClasses,
+    /// No password meeting the policy turned up in a thousand tries.
+    PolicyUnsatisfiable,
+
+    // The clipboard and typing.
+    /// The clipboard could not be opened.
+    ClipboardBusy(String),
+    /// The clipboard opened and would not take the text.
+    ClipboardWrite(String),
+    /// Auto-type with no window to type into.
+    NothingInFront,
+    /// Auto-type with this program's own window in front.
+    OwnWindowInFront,
+    /// The system took fewer keystrokes than it was sent.
+    KeystrokesRefused,
+    /// Auto-type on a system it is not written for.
+    TypingUnsupported,
 }
 
 impl Refusal {
     /// The sentence, in the language `strings` is in.
     pub fn text(&self, strings: &crate::i18n::Strings) -> String {
-        use crate::i18n::{fill2, fill3};
-        let said = &strings.errors;
+        use crate::i18n::{fill1, fill2, fill3};
+        let said = &strings.refusals;
         match self {
             Refusal::NotOpen => said.not_open.to_owned(),
             Refusal::EntryNeedsName => strings.entry.needs_name.to_owned(),
+            Refusal::NotAVault => said.not_a_vault.to_owned(),
+            Refusal::VaultFull { holds, room } => fill2(said.vault_full, holds, room),
+            Refusal::ReplacedWhileOpen => said.replaced_while_open.to_owned(),
+            Refusal::ContentsUnreadable(detail) => fill1(said.contents_unreadable, detail),
+            Refusal::NoSuchBackup => said.no_such_backup.to_owned(),
+            Refusal::MirrorIsVaultDirectory => said.mirror_is_vault_directory.to_owned(),
+            Refusal::AlreadyHiddenVault => strings.hidden.unavailable.to_owned(),
             Refusal::HiddenSamePassword => strings.hidden.same_password.to_owned(),
             Refusal::HiddenExists => strings.hidden.exists.to_owned(),
             Refusal::PasswordOpensOther => strings.hidden.opens_other.to_owned(),
-            Refusal::SettingsUnreadable {
-                path,
-                reason,
-                moved_to: Some(aside),
-            } => fill3(said.settings_moved, path.display(), reason, aside.display()),
-            Refusal::SettingsUnreadable {
-                path,
-                reason,
-                moved_to: None,
-            } => fill2(said.settings_unreadable, path.display(), reason),
+            Refusal::NothingToChange => said.nothing_to_change.to_owned(),
+            Refusal::WouldNotFit { holds } => fill1(said.would_not_fit, holds),
+            Refusal::OtherVaultWouldNotFit => said.other_vault_would_not_fit.to_owned(),
+            Refusal::WorkFactorNeedsPassword => said.work_factor_needs_password.to_owned(),
+            Refusal::NotARecord(detail) => fill1(said.not_a_record, detail),
+            Refusal::RecordOfAnotherVault => said.record_of_another_vault.to_owned(),
+            Refusal::RecordDamaged => said.record_damaged.to_owned(),
+            Refusal::RecordNotForThisPassword => said.record_not_for_this_password.to_owned(),
+            Refusal::NoVaultAt(path) => fill1(said.no_vault_at, path.display()),
+            Refusal::NoContainerAt(path) => fill1(said.no_container_at, path.display()),
+            Refusal::AlreadyExists(path) => fill1(said.already_exists, path.display()),
+            Refusal::WouldOverwrite(path) => fill1(said.would_overwrite, path.display()),
+            Refusal::ChooseVaultPath => said.choose_vault_path.to_owned(),
+            Refusal::ChooseContainerPath => said.choose_container_path.to_owned(),
+            Refusal::SettingsMovedAside { path, reason, moved_to } => {
+                fill3(said.settings_moved_aside, path.display(), reason, moved_to.display())
+            }
+            Refusal::SettingsUnreadable { path, reason } => {
+                fill2(said.settings_unreadable, path.display(), reason)
+            }
+            Refusal::ContainerHasNoVault => {
+                fill1(said.container_has_no_vault, crate::config::VAULT_FILENAME)
+            }
+            Refusal::ContainerKeyMissing(path) => {
+                fill1(said.container_key_missing, path.display())
+            }
+            Refusal::ContainerKeyEmpty => said.container_key_empty.to_owned(),
+            Refusal::VeraCryptMissing => said.vera_crypt_missing.to_owned(),
+            Refusal::VeraCryptFormatMissing => said.vera_crypt_format_missing.to_owned(),
+            Refusal::MountFailed => said.mount_failed.to_owned(),
+            Refusal::NoDriveLetter => said.no_drive_letter.to_owned(),
+            Refusal::ContainerNotCreated { exit_code, output } => {
+                fill2(said.container_not_created, exit_code, output)
+            }
+            Refusal::NoPieces => said.no_pieces.to_owned(),
+            Refusal::TooFewPieces => said.too_few_pieces.to_owned(),
+            Refusal::PieceGivenTwice => said.piece_given_twice.to_owned(),
+            Refusal::PiecesFromDifferentSets => said.pieces_from_different_sets.to_owned(),
+            Refusal::PiecesOfAnotherVersion => said.pieces_of_another_version.to_owned(),
+            Refusal::PiecesDamaged => said.pieces_damaged.to_owned(),
+            Refusal::PieceTooShort => said.piece_too_short.to_owned(),
+            Refusal::PieceMistyped => said.piece_mistyped.to_owned(),
+            Refusal::PiecesNotAPassword => said.pieces_not_a_password.to_owned(),
+            Refusal::NothingToSplit => said.nothing_to_split.to_owned(),
+            Refusal::ThresholdTooLow => said.threshold_too_low.to_owned(),
+            Refusal::FewerPiecesThanThreshold => said.fewer_pieces_than_threshold.to_owned(),
+            Refusal::TooManyPieces => said.too_many_pieces.to_owned(),
+            Refusal::ImportEmpty => said.import_empty.to_owned(),
+            Refusal::ImportNoNameColumn => said.import_no_name_column.to_owned(),
+            Refusal::ExportHasNoEntries => said.export_has_no_entries.to_owned(),
+            Refusal::NotAnExport(detail) => fill1(said.not_an_export, detail),
+            Refusal::NoPasswordsInList => said.no_passwords_in_list.to_owned(),
+            Refusal::TotpEmpty => said.totp_empty.to_owned(),
+            Refusal::TotpBadCharacter(character) => fill1(said.totp_bad_character, character),
+            Refusal::TotpUnusable => said.totp_unusable.to_owned(),
+            Refusal::TotpDigits => said.totp_digits.to_owned(),
+            Refusal::TotpPeriod => said.totp_period.to_owned(),
+            Refusal::PolicyTooShort => said.policy_too_short.to_owned(),
+            Refusal::PolicyTooLong => said.policy_too_long.to_owned(),
+            Refusal::PolicyNoClasses => said.policy_no_classes.to_owned(),
+            Refusal::PolicyShorterThanClasses => said.policy_shorter_than_classes.to_owned(),
+            Refusal::PolicyUnsatisfiable => said.policy_unsatisfiable.to_owned(),
+            Refusal::ClipboardBusy(detail) => fill1(said.clipboard_busy, detail),
+            Refusal::ClipboardWrite(detail) => fill1(said.clipboard_write, detail),
+            Refusal::NothingInFront => said.nothing_in_front.to_owned(),
+            Refusal::OwnWindowInFront => said.own_window_in_front.to_owned(),
+            Refusal::KeystrokesRefused => said.keystrokes_refused.to_owned(),
+            Refusal::TypingUnsupported => said.typing_unsupported.to_owned(),
         }
+    }
+
+    /// Whether the same password is worth offering again. True for what went
+    /// wrong around the container rather than with what was typed.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Refusal::VeraCryptMissing
+                | Refusal::VeraCryptFormatMissing
+                | Refusal::MountFailed
+                | Refusal::NoDriveLetter
+                | Refusal::ContainerNotCreated { .. }
+        )
     }
 }
 
@@ -266,7 +504,11 @@ impl Error {
     /// True when retrying with different input could plausibly succeed.
     /// The UI uses this to decide whether to keep the password field open.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Error::Authentication | Error::VeraCrypt(_))
+        match self {
+            Error::Authentication | Error::VeraCrypt(_) => true,
+            Error::Refused(refusal) => refusal.is_retryable(),
+            _ => false,
+        }
     }
 }
 
@@ -326,33 +568,95 @@ mod tests {
         vec![
             Refusal::NotOpen,
             Refusal::EntryNeedsName,
+            Refusal::NotAVault,
+            Refusal::VaultFull { holds: 5_000_000, room: 4_194_300 },
+            Refusal::ReplacedWhileOpen,
+            Refusal::ContentsUnreadable("expected value at line 1".into()),
+            Refusal::NoSuchBackup,
+            Refusal::MirrorIsVaultDirectory,
+            Refusal::AlreadyHiddenVault,
             Refusal::HiddenSamePassword,
             Refusal::HiddenExists,
             Refusal::PasswordOpensOther,
-            Refusal::SettingsUnreadable {
-                path: std::path::PathBuf::from("C:/app/config.json"),
-                reason: "expected value at line 1".into(),
-                moved_to: Some(std::path::PathBuf::from("C:/app/config.unreadable.json")),
-            },
-            Refusal::SettingsUnreadable {
-                path: std::path::PathBuf::from("C:/app/config.json"),
-                reason: "expected value at line 1".into(),
-                moved_to: None,
-            },
+            Refusal::NothingToChange,
+            Refusal::WouldNotFit { holds: 5_000_000 },
+            Refusal::OtherVaultWouldNotFit,
+            Refusal::WorkFactorNeedsPassword,
+            Refusal::NotARecord("expected value at line 1".into()),
+            Refusal::RecordOfAnotherVault,
+            Refusal::RecordDamaged,
+            Refusal::RecordNotForThisPassword,
+            Refusal::NoVaultAt(std::path::PathBuf::from("C:/vaults/here.ddv")),
+            Refusal::NoContainerAt(std::path::PathBuf::from("C:/vaults/vault.hc")),
+            Refusal::AlreadyExists(std::path::PathBuf::from("C:/vaults/vault.ddv")),
+            Refusal::WouldOverwrite(std::path::PathBuf::from("E:/usb/deep-defense.key")),
+            Refusal::ChooseVaultPath,
+            Refusal::ChooseContainerPath,
+            Refusal::SettingsMovedAside { path: std::path::PathBuf::from("C:/app/config.json"), reason: "expected value".into(), moved_to: std::path::PathBuf::from("C:/app/config.unreadable.json") },
+            Refusal::SettingsUnreadable { path: std::path::PathBuf::from("C:/app/config.json"), reason: "expected value".into() },
+            Refusal::ContainerHasNoVault,
+            Refusal::ContainerKeyMissing(std::path::PathBuf::from("C:/vaults/vault.hc.ddmeta")),
+            Refusal::ContainerKeyEmpty,
+            Refusal::VeraCryptMissing,
+            Refusal::VeraCryptFormatMissing,
+            Refusal::MountFailed,
+            Refusal::NoDriveLetter,
+            Refusal::ContainerNotCreated { exit_code: "1".into(), output: "no space".into() },
+            Refusal::NoPieces,
+            Refusal::TooFewPieces,
+            Refusal::PieceGivenTwice,
+            Refusal::PiecesFromDifferentSets,
+            Refusal::PiecesOfAnotherVersion,
+            Refusal::PiecesDamaged,
+            Refusal::PieceTooShort,
+            Refusal::PieceMistyped,
+            Refusal::PiecesNotAPassword,
+            Refusal::NothingToSplit,
+            Refusal::ThresholdTooLow,
+            Refusal::FewerPiecesThanThreshold,
+            Refusal::TooManyPieces,
+            Refusal::ImportEmpty,
+            Refusal::ImportNoNameColumn,
+            Refusal::ExportHasNoEntries,
+            Refusal::NotAnExport("expected value at line 1".into()),
+            Refusal::NoPasswordsInList,
+            Refusal::TotpEmpty,
+            Refusal::TotpBadCharacter('!'),
+            Refusal::TotpUnusable,
+            Refusal::TotpDigits,
+            Refusal::TotpPeriod,
+            Refusal::PolicyTooShort,
+            Refusal::PolicyTooLong,
+            Refusal::PolicyNoClasses,
+            Refusal::PolicyShorterThanClasses,
+            Refusal::PolicyUnsatisfiable,
+            Refusal::ClipboardBusy("occupied".into()),
+            Refusal::ClipboardWrite("occupied".into()),
+            Refusal::NothingInFront,
+            Refusal::OwnWindowInFront,
+            Refusal::KeystrokesRefused,
+            Refusal::TypingUnsupported,
         ]
     }
 
     #[test]
     fn a_refusal_names_what_it_is_about_in_both_languages() {
         for strings in [&EN, &RU] {
-            let moved = Refusal::SettingsUnreadable {
+            let moved = Refusal::SettingsMovedAside {
                 path: std::path::PathBuf::from("C:/app/config.json"),
                 reason: "expected value".into(),
-                moved_to: Some(std::path::PathBuf::from("C:/app/config.unreadable.json")),
+                moved_to: std::path::PathBuf::from("C:/app/config.unreadable.json"),
             }
             .text(strings);
             assert!(moved.contains("config.json") && moved.contains("expected value"));
             assert!(moved.contains("config.unreadable.json"), "{moved}");
+
+            let full = Refusal::VaultFull {
+                holds: 5_000_000,
+                room: 4_194_300,
+            }
+            .text(strings);
+            assert!(full.contains("5000000") && full.contains("4194300"), "{full}");
         }
     }
 
@@ -473,6 +777,8 @@ mod tests {
         // them would be a lie.
         assert!(Error::Authentication.is_retryable());
         assert!(Error::veracrypt("did not mount").is_retryable());
+        assert!(Error::from(Refusal::MountFailed).is_retryable());
+        assert!(!Error::from(Refusal::NotAVault).is_retryable());
 
         assert!(!Error::format("not a share").is_retryable());
         assert!(!Error::EntryNotFound("Bank".into()).is_retryable());

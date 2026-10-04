@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-use crate::errors::{Error, Result};
+use crate::errors::{Error, Refusal, Result};
 use crate::secret::Secret;
 
 #[cfg(windows)]
@@ -135,13 +135,10 @@ impl VeraCrypt {
     }
 
     fn require(&self) -> Result<&PathBuf> {
-        self.binary.as_ref().filter(|p| p.is_file()).ok_or_else(|| {
-            Error::veracrypt(
-                "VeraCrypt was not found on this system.\n\n\
-                 Install it from https://www.veracrypt.fr and restart Deep Defense. \
-                 If it is installed in an unusual location, set the path in Settings.",
-            )
-        })
+        self.binary
+            .as_ref()
+            .filter(|p| p.is_file())
+            .ok_or_else(|| Refusal::VeraCryptMissing.into())
     }
 
     fn run(&self, command: &mut Command, password: Option<&Secret>, stdin: bool) -> Result<Output> {
@@ -192,16 +189,11 @@ impl VeraCrypt {
             .format_binary
             .as_ref()
             .filter(|p| p.is_file())
-            .ok_or_else(|| {
-                Error::veracrypt("\"VeraCrypt Format\" was not found next to VeraCrypt")
-            })?;
+            .ok_or(Refusal::VeraCryptFormatMissing)?;
 
         let container = volume.container;
         if container.exists() {
-            return Err(Error::veracrypt(format!(
-                "refusing to overwrite an existing file: {}",
-                container.display()
-            )));
+            return Err(Refusal::WouldOverwrite(container.to_path_buf()).into());
         }
         if let Some(parent) = container.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::io(parent.to_path_buf(), e))?;
@@ -231,15 +223,14 @@ impl VeraCrypt {
         if container.is_file() {
             return Ok(());
         }
-        Err(Error::veracrypt(format!(
-            "the container was not created (exit code {}).\n{}",
-            output
+        Err(Refusal::ContainerNotCreated {
+            exit_code: output
                 .status
                 .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "unknown".into()),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )))
+                .map_or_else(|| "?".into(), |code| code.to_string()),
+            output: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        }
+        .into())
     }
 
     // ---------------------------------------------------------------- mount
@@ -254,10 +245,7 @@ impl VeraCrypt {
     ) -> Result<MountPoint> {
         let binary = self.require()?.clone();
         if !container.is_file() {
-            return Err(Error::veracrypt(format!(
-                "container not found: {}",
-                container.display()
-            )));
+            return Err(Refusal::NoContainerAt(container.to_path_buf()).into());
         }
 
         let mount_point;
@@ -318,11 +306,7 @@ impl VeraCrypt {
         }
 
         self.cleanup_dir(&mount_point);
-        Err(Error::veracrypt(
-            "could not mount the container.\n\n\
-             The usual causes are a wrong password, wrong or missing keyfiles, \
-             a wrong PIM, or the container already being mounted elsewhere.",
-        ))
+        Err(Refusal::MountFailed.into())
     }
 
     // ------------------------------------------------------------- dismount
@@ -583,9 +567,7 @@ fn free_drive_letter() -> Result<char> {
             return Ok(letter);
         }
     }
-    Err(Error::veracrypt(
-        "every drive letter is in use — free one and try again",
-    ))
+    Err(Refusal::NoDriveLetter.into())
 }
 
 #[cfg(not(windows))]
@@ -667,7 +649,7 @@ mod tests {
                 false,
             )
             .unwrap_err();
-        assert!(err.to_string().contains("container not found"));
+        assert!(matches!(err, Error::Refused(Refusal::NoContainerAt(_))));
     }
 
     #[cfg(windows)]

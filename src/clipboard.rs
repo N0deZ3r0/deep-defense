@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::errors::{Error, Result};
+use crate::errors::{Refusal, Result};
 
 /// How often a busy clipboard is tried before giving up, and how long apart.
 const ATTEMPTS: u32 = 10;
@@ -57,13 +57,13 @@ impl ClipboardManager {
                 // Borrowed, not copied: a copy here would be one more heap
                 // buffer holding the password, freed without a wipe.
                 .text(text)
-                .map_err(|e| Error::vault(format!("cannot write to the clipboard: {e}")))?;
+                .map_err(|e| Refusal::ClipboardWrite(e.to_string()))?;
         }
         #[cfg(not(windows))]
         {
             clipboard
                 .set_text(text)
-                .map_err(|e| Error::vault(format!("cannot write to the clipboard: {e}")))?;
+                .map_err(|e| Refusal::ClipboardWrite(e.to_string()))?;
         }
 
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -166,12 +166,7 @@ fn try_clear(digest: &[u8; 32]) -> bool {
 }
 
 fn open() -> Result<arboard::Clipboard> {
-    arboard::Clipboard::new().map_err(|e| {
-        Error::vault(format!(
-            "cannot reach the system clipboard: {e}. \
-             Another application may be holding it open."
-        ))
-    })
+    arboard::Clipboard::new().map_err(|e| Refusal::ClipboardBusy(e.to_string()).into())
 }
 
 #[cfg(test)]

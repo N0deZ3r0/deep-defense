@@ -269,10 +269,7 @@ fn rebuild_password(app: &mut App, shares: &[crate::shamir::Share]) {
                 app.show_recovery_unlock = false;
             }
             Err(_) => {
-                let error = crate::errors::Error::format(
-                    "the pieces combined, but not into a password — one of them is \
-                     probably from another set",
-                );
+                let error = crate::errors::Error::from(crate::errors::Refusal::PiecesNotAPassword);
                 app.status = Some(Status::error(strings, &error));
             }
         },

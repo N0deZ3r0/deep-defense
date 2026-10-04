@@ -42,7 +42,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::random_bytes;
-use crate::errors::{Error, Result};
+use crate::errors::{Error, Refusal, Result};
 
 /// Fewer than two makes the share a copy of the secret, not a share of it.
 pub const MIN_THRESHOLD: u8 = 2;
@@ -245,20 +245,16 @@ fn base32_decode(text: &str) -> Vec<u8> {
 /// Splits `secret` into `count` shares, any `threshold` of which rebuild it.
 pub fn split(secret: &[u8], threshold: u8, count: u8) -> Result<Vec<Share>> {
     if secret.is_empty() {
-        return Err(Error::format("there is nothing to split"));
+        return Err(Refusal::NothingToSplit.into());
     }
     if threshold < MIN_THRESHOLD {
-        return Err(Error::format(
-            "a threshold below two would make every share a copy of the secret",
-        ));
+        return Err(Refusal::ThresholdTooLow.into());
     }
     if count < threshold {
-        return Err(Error::format(
-            "fewer shares than the threshold could never be combined",
-        ));
+        return Err(Refusal::FewerPiecesThanThreshold.into());
     }
     if count > MAX_SHARES {
-        return Err(Error::format("too many shares"));
+        return Err(Refusal::TooManyPieces.into());
     }
 
     let mut set_id = [0u8; SET_ID_LEN];
@@ -306,12 +302,10 @@ pub fn split(secret: &[u8], threshold: u8, count: u8) -> Result<Vec<Share>> {
 
 /// Rebuilds the secret from `threshold` or more shares of one set.
 pub fn combine(shares: &[Share]) -> Result<Zeroizing<Vec<u8>>> {
-    let first = shares
-        .first()
-        .ok_or_else(|| Error::format("no shares were given"))?;
+    let first = shares.first().ok_or(Refusal::NoPieces)?;
 
     if first.version != VERSION {
-        return Err(Error::format("these shares were made by another version"));
+        return Err(Refusal::PiecesOfAnotherVersion.into());
     }
     // The threshold comes from the piece itself, and the checksum on a piece
     // catches typing mistakes, not forgery. A piece claiming a threshold of
@@ -319,23 +313,21 @@ pub fn combine(shares: &[Share]) -> Result<Zeroizing<Vec<u8>>> {
     // and one claiming one handed its own bytes back as the secret. `split`
     // never makes either.
     if !(MIN_THRESHOLD..=MAX_SHARES).contains(&first.threshold) {
-        return Err(Error::format("these shares carry an impossible threshold"));
+        return Err(Refusal::PiecesDamaged.into());
     }
     let threshold = first.threshold as usize;
     let length = first.data.len();
 
     for share in shares {
-        if share.threshold != first.threshold || share.version != first.version {
-            return Err(Error::format("these shares do not belong to one set"));
+        let same_set = share.set_id == first.set_id
+            && share.threshold == first.threshold
+            && share.version == first.version;
+        if !same_set {
+            return Err(Refusal::PiecesFromDifferentSets.into());
         }
-        if share.set_id != first.set_id {
-            return Err(Error::format("these shares come from different splits"));
-        }
-        if share.data.len() != length {
-            return Err(Error::format("these shares are of different lengths"));
-        }
-        if share.index == 0 {
-            return Err(Error::format("a share carries an impossible index"));
+        // One set, and yet a length or an index no piece of it could have.
+        if share.data.len() != length || share.index == 0 {
+            return Err(Refusal::PiecesDamaged.into());
         }
     }
 
@@ -344,12 +336,12 @@ pub fn combine(shares: &[Share]) -> Result<Zeroizing<Vec<u8>>> {
     // readable message.
     for (position, share) in shares.iter().enumerate() {
         if shares[..position].iter().any(|s| s.index == share.index) {
-            return Err(Error::format("the same share was given twice"));
+            return Err(Refusal::PieceGivenTwice.into());
         }
     }
 
     if shares.len() < threshold {
-        return Err(Error::format("not enough shares"));
+        return Err(Refusal::TooFewPieces.into());
     }
 
     let used = &shares[..threshold];
@@ -381,16 +373,14 @@ pub fn parse_share(text: &str) -> Result<Share> {
     // The decoded bytes are the piece, so they are wiped like one.
     let blob = Zeroizing::new(base32_decode(text));
     if blob.len() < HEADER_LEN + CHECKSUM_LEN + 1 {
-        return Err(Error::format("that is too short to be a share"));
+        return Err(Refusal::PieceTooShort.into());
     }
     let split_at = blob.len() - CHECKSUM_LEN;
     let (body, checksum) = blob.split_at(split_at);
 
     let expected = Sha256::digest(body);
     if expected[..CHECKSUM_LEN] != *checksum {
-        return Err(Error::format(
-            "that share did not check out — a character is probably wrong",
-        ));
+        return Err(Refusal::PieceMistyped.into());
     }
 
     let mut set_id = [0u8; SET_ID_LEN];

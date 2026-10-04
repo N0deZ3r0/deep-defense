@@ -7,7 +7,7 @@
 use zeroize::Zeroizing;
 
 use crate::crypto::random_bytes;
-use crate::errors::{Error, Result};
+use crate::errors::{Error, Refusal, Result};
 
 pub const LOWER: &str = "abcdefghijklmnopqrstuvwxyz";
 pub const UPPER: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -74,19 +74,17 @@ impl Policy {
 
     pub fn validate(&self) -> Result<()> {
         if self.length < 8 {
-            return Err(Error::vault("a generated password must be at least 8 characters"));
+            return Err(Refusal::PolicyTooShort.into());
         }
         if self.length > 512 {
-            return Err(Error::vault("a generated password must be at most 512 characters"));
+            return Err(Refusal::PolicyTooLong.into());
         }
         let classes = self.classes();
         if classes.is_empty() {
-            return Err(Error::vault("enable at least one character class"));
+            return Err(Refusal::PolicyNoClasses.into());
         }
         if self.require_each_class && self.length < classes.len() {
-            return Err(Error::vault(
-                "the password is too short to hold one character from each class",
-            ));
+            return Err(Refusal::PolicyShorterThanClasses.into());
         }
         Ok(())
     }
@@ -169,9 +167,7 @@ pub fn generate_password(policy: &Policy) -> Result<Zeroizing<String>> {
             return Ok(candidate);
         }
     }
-    Err(Error::vault(
-        "could not satisfy the password policy — loosen it or increase the length",
-    ))
+    Err(Refusal::PolicyUnsatisfiable.into())
 }
 
 /// Generate a random keyfile for VeraCrypt to use alongside the password.
@@ -181,10 +177,7 @@ pub fn generate_password(policy: &Policy) -> Result<Zeroizing<String>> {
 /// container defeats the entire point.
 pub fn generate_keyfile(path: &std::path::Path, size: usize) -> Result<()> {
     if path.exists() {
-        return Err(Error::vault(format!(
-            "refusing to overwrite an existing file: {}",
-            path.display()
-        )));
+        return Err(Refusal::WouldOverwrite(path.to_path_buf()).into());
     }
     if !(64..=1_048_576).contains(&size) {
         return Err(Error::vault("a keyfile must be between 64 bytes and 1 MiB"));

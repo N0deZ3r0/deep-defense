@@ -801,7 +801,7 @@ fn totp_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &Stri
 
         match parsed {
             None => widgets::hint(ui, palette, strings.entry.totp_hint),
-            Some(Err(e)) => widgets::error_text(ui, palette, &e.to_string()),
+            Some(Err(e)) => widgets::error_text(ui, palette, &e.localized(strings)),
             Some(Ok(config)) => match config.current() {
                 Ok((code, remaining)) => {
                     ui.add_space(theme::space::MD);
@@ -819,7 +819,10 @@ fn totp_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &Stri
                                 .color(palette.accent)
                                 .monospace(),
                         );
-                        ui.label(theme::muted(palette, format!("{remaining}s")));
+                        ui.label(theme::muted(
+                            palette,
+                            super::app::format_seconds(strings, remaining),
+                        ));
                         if widgets::icon_button(
                             ui,
                             palette,
@@ -849,7 +852,7 @@ fn totp_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: &Stri
                         palette.accent,
                     );
                 }
-                Err(e) => widgets::error_text(ui, palette, &e.to_string()),
+                Err(e) => widgets::error_text(ui, palette, &e.localized(strings)),
             },
         }
     });
@@ -1686,12 +1689,7 @@ mod tests {
     /// An app on the main screen, holding a small vault with one entry.
     fn open_app(home: &TestHome) -> App {
         let path = home.join("vault.ddv");
-        let params = crate::crypto::KdfParams {
-            m_cost: crate::crypto::KdfParams::MIN_M_COST,
-            t_cost: 2,
-            p_cost: 1,
-            algorithm: "argon2id".into(),
-        };
+        let params = crate::crypto::KdfParams::cheapest();
         let mut vault = Vault::create_in_slot(
             &path,
             &Secret::from_str("editor"),
