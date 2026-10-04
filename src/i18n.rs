@@ -64,14 +64,40 @@ impl Lang {
     }
 }
 
+/// Put `values` where the template says "{}", left to right.
+///
+/// In one pass over the template, so a value is never looked at again once it
+/// is in. Filled one after another, a path or an entry name that happened to
+/// contain "{}" took the next value into itself and left the template's own
+/// placeholder standing.
+fn fill(template: &str, values: &[&dyn std::fmt::Display]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(template.len());
+    let mut values = values.iter();
+    let mut rest = template;
+    while let Some(at) = rest.find("{}") {
+        out.push_str(&rest[..at]);
+        match values.next() {
+            Some(value) => {
+                // Writing to a `String` cannot fail.
+                let _ = write!(out, "{value}");
+            }
+            None => out.push_str("{}"),
+        }
+        rest = &rest[at + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Substitute one value into a template.
 pub fn fill1(template: &str, a: impl std::fmt::Display) -> String {
-    template.replacen("{}", &a.to_string(), 1)
+    fill(template, &[&a])
 }
 
 /// Substitute two values, left to right.
 pub fn fill2(template: &str, a: impl std::fmt::Display, b: impl std::fmt::Display) -> String {
-    fill1(&fill1(template, a), b)
+    fill(template, &[&a, &b])
 }
 
 /// Substitute three values, left to right.
@@ -81,7 +107,7 @@ pub fn fill3(
     b: impl std::fmt::Display,
     c: impl std::fmt::Display,
 ) -> String {
-    fill1(&fill2(template, a, b), c)
+    fill(template, &[&a, &b, &c])
 }
 
 pub struct Strings {
@@ -1932,6 +1958,16 @@ mod tests {
         assert_eq!(fill2("{} of {} match", 3, 40), "3 of 40 match");
         // A template with no placeholder must survive untouched.
         assert_eq!(fill1("Saved.", 7), "Saved.");
+        assert_eq!(fill3("{}: {} ({})", 1, 2, 3), "1: 2 (3)");
+    }
+
+    #[test]
+    fn a_value_is_not_filled_a_second_time() {
+        // A file can be called "{}.ddv". Filled one value after another, the
+        // second value landed inside the first.
+        assert_eq!(fill2("{}: {}", "C:/{}.ddv", "denied"), "C:/{}.ddv: denied");
+        // Too few values leaves the placeholder showing, where a test sees it.
+        assert_eq!(fill1("{} of {}", 3), "3 of {}");
     }
 
     #[test]
