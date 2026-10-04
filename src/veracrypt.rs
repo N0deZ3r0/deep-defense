@@ -21,6 +21,11 @@ use crate::secret::Secret;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// How long a volume is given to appear once VeraCrypt says it mounted it.
+const ATTACH_PATIENCE: Duration = Duration::from_secs(45);
+/// And once it says it did not: long enough for it to be wrong, and no more.
+const REFUSED_PATIENCE: Duration = Duration::from_secs(5);
+
 /// Drive letters we never hand out, even if Windows reports them free.
 const RESERVED_LETTERS: [char; 3] = ['A', 'B', 'C'];
 
@@ -159,7 +164,12 @@ impl VeraCrypt {
     /// Refuses to touch an existing file: silently reformatting a container
     /// would destroy whatever was inside it.
     ///
-    /// Eight arguments, and a struct to hold them would be worse: every one is
+    /// `pim` is the one the volume will be mounted with. It used to be
+    /// written as zero here whatever the settings said, so a volume made with
+    /// a PIM configured was created under one number and asked for under
+    /// another, and never opened.
+    ///
+    /// Nine arguments, and a struct to hold them would be worse: every one is
     /// a distinct decision VeraCrypt's command line demands, and bundling them
     /// would let a caller build a half-filled struct that only fails when the
     /// process runs.
@@ -170,6 +180,7 @@ impl VeraCrypt {
         size_bytes: u64,
         password: &Secret,
         keyfiles: &[PathBuf],
+        pim: u32,
         encryption: &str,
         hash_algo: &str,
         quick: bool,
@@ -204,6 +215,7 @@ impl VeraCrypt {
                 size_bytes,
                 password_text,
                 keyfiles,
+                pim,
                 encryption,
                 hash_algo,
                 quick,
@@ -214,7 +226,7 @@ impl VeraCrypt {
         #[cfg(not(windows))]
         {
             command.args(posix_create_args(
-                container, size_bytes, keyfiles, encryption, hash_algo, quick,
+                container, size_bytes, keyfiles, pim, encryption, hash_algo, quick,
             ));
             let output = self.run(&mut command, Some(password), true)?;
             self.check_created(container, &output)
@@ -257,6 +269,7 @@ impl VeraCrypt {
         }
 
         let mount_point;
+        let reported_mounted;
         let mut command = Command::new(&binary);
 
         #[cfg(windows)]
@@ -278,7 +291,7 @@ impl VeraCrypt {
                 pim,
                 read_only,
             ));
-            self.run(&mut command, Some(password), false)?;
+            reported_mounted = self.run(&mut command, Some(password), false)?.status.success();
         }
         #[cfg(not(windows))]
         {
@@ -290,13 +303,21 @@ impl VeraCrypt {
                 created_dir: true,
             };
             command.args(posix_mount_args(container, &dir, keyfiles, pim, read_only));
-            self.run(&mut command, Some(password), true)?;
+            reported_mounted = self.run(&mut command, Some(password), true)?.status.success();
         }
 
         // The Windows binary returns before the volume is actually attached,
-        // so poll for a readable mount point instead of trusting the exit
-        // code. A mount point that never becomes readable means failure.
-        let deadline = Instant::now() + Duration::from_secs(45);
+        // so a readable mount point is what counts as success, not the exit
+        // code. The exit code is still heard out when it reports a failure:
+        // the wait is then a few seconds' grace, not the three quarters of a
+        // minute a slow attach is allowed — which is what a missing keyfile
+        // used to cost on every attempt.
+        let patience = if reported_mounted {
+            ATTACH_PATIENCE
+        } else {
+            REFUSED_PATIENCE
+        };
+        let deadline = Instant::now() + patience;
         while Instant::now() < deadline {
             if mount_point.is_present() && mount_point.is_ready() {
                 return Ok(mount_point);
@@ -401,6 +422,7 @@ fn windows_create_args(
     size_bytes: u64,
     password: &str,
     keyfiles: &[PathBuf],
+    pim: u32,
     encryption: &str,
     hash_algo: &str,
     quick: bool,
@@ -420,7 +442,7 @@ fn windows_create_args(
         "/filesystem".into(),
         "NTFS".into(),
         "/pim".into(),
-        "0".into(),
+        pim.to_string().into(),
         "/force".into(),
         "/silent".into(),
     ];
@@ -476,6 +498,7 @@ fn posix_create_args(
     container: &Path,
     size_bytes: u64,
     keyfiles: &[PathBuf],
+    pim: u32,
     encryption: &str,
     hash_algo: &str,
     quick: bool,
@@ -496,7 +519,7 @@ fn posix_create_args(
         "--volume-type".into(),
         "normal".into(),
         "--pim".into(),
-        "0".into(),
+        pim.to_string().into(),
         "--random-source".into(),
         "/dev/urandom".into(),
         "--keyfiles".into(),
@@ -637,6 +660,7 @@ mod tests {
                 1024 * 1024,
                 &Secret::from_str("pw"),
                 &[],
+                0,
                 "AES",
                 "sha512",
                 false,
@@ -714,10 +738,13 @@ mod tests {
             64 * 1024 * 1024,
             "pw",
             &[],
+            485,
             "AES(Twofish(Serpent))",
             "sha512",
             false,
         ));
+        // The same number the mount line carries, or the volume never opens.
+        assert!(has_pair(&args, "/pim", "485"));
         assert!(has_pair(&args, "/size", "67108864"));
         assert!(has_pair(&args, "/encryption", "AES(Twofish(Serpent))"));
         assert!(has_pair(&args, "/hash", "sha512"));
@@ -746,6 +773,7 @@ mod tests {
             Path::new("/vaults/v.hc"),
             1024,
             &[],
+            0,
             "AES",
             "sha512",
             false,

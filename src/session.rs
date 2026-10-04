@@ -492,6 +492,7 @@ fn create_in_container(
         size_bytes,
         &container_password,
         &config.keyfiles,
+        config.pim,
         &config.encryption,
         &config.hash_algo,
         false, // full format: fills the container with random data
