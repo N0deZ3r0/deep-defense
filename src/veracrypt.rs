@@ -570,12 +570,6 @@ fn free_drive_letter() -> Result<char> {
     Err(Refusal::NoDriveLetter.into())
 }
 
-#[cfg(not(windows))]
-#[allow(dead_code)]
-fn free_drive_letter() -> Result<char> {
-    Err(Error::veracrypt("drive letters are a Windows concept"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
