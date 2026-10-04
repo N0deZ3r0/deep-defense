@@ -4,9 +4,10 @@
 use eframe::egui;
 use zeroize::Zeroizing;
 
+use crate::errors::{Error, Result};
 use crate::generator::{estimate_entropy_bits, generate_password, Strength};
 use crate::i18n::{fill1, fill2, Strings};
-use crate::model::Entry;
+use crate::model::{Attachment, AuditAction, CustomField, Entry, VaultData};
 use crate::totp::TotpConfig;
 
 use super::app::{App, Draft, Leave, Status};
@@ -411,9 +412,11 @@ fn spoken_name(strings: &Strings, row: &Row) -> String {
 
 /// Move away from the editor, asking first if that would lose an edit.
 ///
-/// Every way out goes through here — a click in the list, the arrow keys,
-/// "+", Ctrl+N and Esc. Each of them used to replace the editor outright, and
-/// whatever had been typed into it was gone without a word.
+/// Every way out that a person takes goes through here — a click in the
+/// list, the arrow keys, "+", Ctrl+N, Esc, the lock button and closing the
+/// window. Each of them used to drop the editor outright, and whatever had
+/// been typed into it was gone without a word. The idle timer and the screen
+/// lock do not ask: nobody is there to answer, and the vault has to close.
 pub(crate) fn leave_editor(app: &mut App, to: Leave) {
     if app.leaving.is_some() {
         return;
@@ -443,6 +446,8 @@ fn go(app: &mut App, to: Leave) {
             app.selected = None;
             app.reveal_password = false;
         }
+        Leave::Lock => app.lock_now(),
+        Leave::Quit => app.close_window(),
     }
 }
 
@@ -1047,7 +1052,7 @@ fn attachments_card(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings
 ///
 /// Two attachments under one name could not be told apart: "Save as" always
 /// wrote out the first, and removing either removed both.
-fn unique_attachment_name(taken: &[crate::model::Attachment], name: &str) -> String {
+fn unique_attachment_name(taken: &[Attachment], name: &str) -> String {
     let free = |candidate: &str| !taken.iter().any(|a| a.name == candidate);
     if free(name) {
         return name.to_string();
@@ -1104,42 +1109,18 @@ fn add_attachment(app: &mut App, key: &str, free: usize) {
     }
 }
 
-/// Add a file to an entry and save — or, if the save fails, leave the entry
-/// as it was.
-///
-/// Left in place after a failed save, the file showed in the list as though
-/// it were stored, and it counted against the slot on every save after, so a
-/// vault it had filled refused to save anything until it was removed by hand.
-fn attach(app: &mut App, key: &str, name: &str, bytes: &[u8]) -> crate::errors::Result<()> {
-    let vault = app
-        .session
-        .vault_mut()
-        .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
-    let previous_audit = vault.data.audit.clone();
-    let entry = vault
-        .data
-        .find_mut(key)
-        .ok_or_else(|| crate::errors::Error::EntryNotFound(key.to_string()))?;
-    let previous_update = entry.updated_at.clone();
-    let previous_count = entry.attachments.len();
-    let name = unique_attachment_name(&entry.attachments, name);
-    entry
-        .attachments
-        .push(crate::model::Attachment::new(name.clone(), bytes));
-    entry.touch();
-    vault
-        .data
-        .record(crate::model::AuditAction::AttachmentAdded, &name);
-
-    let saved = vault.save();
-    if saved.is_err() {
-        if let Some(entry) = vault.data.find_mut(key) {
-            entry.attachments.truncate(previous_count);
-            entry.updated_at = previous_update;
-        }
-        vault.data.audit = previous_audit;
-    }
-    saved
+/// Add a file to an entry.
+fn attach(app: &mut App, key: &str, name: &str, bytes: &[u8]) -> Result<()> {
+    app.session.unlocked_mut()?.commit(|data| {
+        let entry = data
+            .find_mut(key)
+            .ok_or_else(|| Error::EntryNotFound(key.to_string()))?;
+        let name = unique_attachment_name(&entry.attachments, name);
+        entry.attachments.push(Attachment::new(name.clone(), bytes));
+        entry.touch();
+        data.record(AuditAction::AttachmentAdded, name);
+        Ok(())
+    })
 }
 
 fn save_attachment(app: &mut App, key: &str, index: usize) {
@@ -1170,7 +1151,7 @@ fn save_attachment(app: &mut App, key: &str, index: usize) {
             path.display().to_string(),
         )),
         Err(e) => {
-            let error = crate::errors::Error::io(path, e);
+            let error = Error::io(path, e);
             app.status = Some(Status::error(strings, &error));
         }
     }
@@ -1184,38 +1165,20 @@ fn remove_attachment(app: &mut App, key: &str, index: usize) {
     }
 }
 
-/// Take one attachment off an entry and save — or, if the save fails, put it
-/// back where it was, so the list does not show a file as gone that the disk
-/// still has.
-fn detach(app: &mut App, key: &str, index: usize) -> crate::errors::Result<()> {
-    let vault = app
-        .session
-        .vault_mut()
-        .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
-    let previous_audit = vault.data.audit.clone();
-    let entry = vault
-        .data
-        .find_mut(key)
-        .ok_or_else(|| crate::errors::Error::EntryNotFound(key.to_string()))?;
-    if index >= entry.attachments.len() {
-        return Ok(());
-    }
-    let previous_update = entry.updated_at.clone();
-    let removed = entry.attachments.remove(index);
-    entry.touch();
-    vault
-        .data
-        .record(crate::model::AuditAction::AttachmentRemoved, &removed.name);
-
-    let saved = vault.save();
-    if saved.is_err() {
-        if let Some(entry) = vault.data.find_mut(key) {
-            entry.attachments.insert(index, removed);
-            entry.updated_at = previous_update;
+/// Take one attachment off an entry.
+fn detach(app: &mut App, key: &str, index: usize) -> Result<()> {
+    app.session.unlocked_mut()?.commit(|data| {
+        let entry = data
+            .find_mut(key)
+            .ok_or_else(|| Error::EntryNotFound(key.to_string()))?;
+        if index >= entry.attachments.len() {
+            return Ok(());
         }
-        vault.data.audit = previous_audit;
-    }
-    saved
+        let removed = entry.attachments.remove(index);
+        entry.touch();
+        data.record(AuditAction::AttachmentRemoved, &removed.name);
+        Ok(())
+    })
 }
 
 /// Bytes as something a person reads without counting digits.
@@ -1346,147 +1309,98 @@ fn action_buttons(
     }
 }
 
-/// Save the entry in the editor. Returns whether it reached the disk.
+/// Save the entry in the editor. Returns whether it was saved.
+///
+/// Saved or not at all: a refusal — a name already taken, a disk that is
+/// full — leaves the vault as it was and the editor as it was typed, so the
+/// same Save can simply be pressed again.
 pub(crate) fn commit_draft(app: &mut App) -> bool {
     let strings = app.strings();
-    let Some(mut draft) = app.draft.take() else {
+    let Some(draft) = app.draft.take() else {
         return false;
     };
-    let tags = draft.parsed_tags();
     let name = draft.name.trim().to_string();
-    let key = name.to_lowercase();
-    // Reachable now that Ctrl+S saves the editor: the button is greyed out
-    // for this, the shortcut is not.
-    if name.is_empty() {
-        let refusal = crate::errors::Error::vault(strings.entry.needs_name);
-        app.status = Some(Status::error(strings, &refusal));
-        app.draft = Some(draft);
-        return false;
-    }
-
-    // In two steps, because a failure means something different in each. A
-    // refusal while applying — a name already taken — has changed nothing.
-    // A failure while saving — a full disk — comes after the vault in memory
-    // already holds the edit.
-    let applied = (|| -> crate::errors::Result<()> {
-        let vault = app
-            .session
-            .vault_mut()
-            .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
-
-        match draft.original_key.clone() {
-            Some(original) => {
-                // Against the name as shown, not the key: the key ignores
-                // case, so a rename from "github" to "GitHub" was skipped and
-                // reported as saved.
-                let shown = vault
-                    .data
-                    .find(&original)
-                    .map(|entry| entry.name.clone())
-                    .ok_or_else(|| crate::errors::Error::EntryNotFound(original.clone()))?;
-                if shown != name {
-                    vault.rename(&original, &name)?;
-                }
-                let entry = vault
-                    .data
-                    .find_mut(&name)
-                    .ok_or_else(|| crate::errors::Error::EntryNotFound(name.clone()))?;
-                let username = draft.username.trim().to_string();
-                let url = draft.url.trim().to_string();
-                let totp = draft.totp.trim().to_string();
-                // Blank rows are the ones the user added and then thought
-                // better of; saving them would clutter every future edit.
-                let fields: Vec<crate::model::CustomField> =
-                    draft.kept_fields().cloned().collect();
-
-                // Compared before assigning, because the log is only useful if
-                // "edited" means something changed. Opening a record and
-                // closing it again must not push the real events off the end.
-                let edited = entry.username != username
-                    || entry.url != url
-                    || entry.notes != *draft.notes
-                    || entry.totp_secret != totp
-                    || entry.tags != tags
-                    || entry.fields.len() != fields.len()
-                    || entry.fields.iter().zip(&fields).any(|(before, after)| {
-                        before.name != after.name
-                            || before.value != after.value
-                            || before.secret != after.secret
-                    });
-
-                entry.username = username;
-                entry.url = url;
-                entry.notes = draft.notes.clone();
-                entry.totp_secret = totp;
-                entry.tags = tags;
-                entry.fields = fields;
-                // Pushes the old value onto the history only if it changed.
-                let password_changed = entry.set_password(draft.password.to_string());
-                // Only for a real change, like the log line below: a save
-                // that changed nothing leaves the date alone.
-                if edited {
-                    entry.touch();
-                }
-
-                // A password change is its own line: it is the one edit worth
-                // spotting at a glance in a list of five hundred.
-                if password_changed {
-                    vault
-                        .data
-                        .record(crate::model::AuditAction::PasswordChanged, &name);
-                }
-                if edited {
-                    vault.data.record(crate::model::AuditAction::EntryEdited, &name);
-                }
-                vault.mark_dirty();
-            }
-            None => {
-                let mut entry = Entry::new(&name);
-                entry.username = draft.username.trim().to_string();
-                entry.url = draft.url.trim().to_string();
-                entry.notes = draft.notes.clone();
-                entry.totp_secret = draft.totp.trim().to_string();
-                entry.tags = tags;
-                entry.fields = draft.kept_fields().cloned().collect();
-                entry.set_password(draft.password.to_string());
-                vault.add(entry)?;
-            }
-        }
-        Ok(())
-    })();
-
-    if let Err(e) = applied {
-        app.status = Some(Status::error(strings, &e));
-        // Keep what was typed: a refused save used to throw the draft away
-        // with it, and the password in it had to be typed again.
-        app.draft = Some(draft);
-        return false;
-    }
-
-    let saved = match app.session.vault_mut() {
-        Some(vault) => vault.save(),
-        None => Err(crate::errors::Error::vault("the vault is not open")),
-    };
+    let saved = app
+        .session
+        .unlocked_mut()
+        .and_then(|vault| vault.commit(|data| apply_draft(data, &draft, &name)));
     match saved {
         Ok(()) => {
             app.status = Some(Status::success(strings.shell.saved));
-            select_entry(app, &key);
+            select_entry(app, &name.to_lowercase());
             true
         }
         Err(e) => {
             app.status = Some(Status::error(strings, &e));
-            // The vault in memory has the edit and stays marked unsaved, so
-            // the next save — or the lock — writes it. The editor now points
-            // at the entry as it is there. Left pointing at the old name, or
-            // still offered as new, a second Save was refused as "no such
-            // entry" or "already exists", and nothing on this screen could
-            // save it any more.
-            draft.original_key = Some(key.clone());
-            app.selected = Some(key);
             app.draft = Some(draft);
             false
         }
     }
+}
+
+/// Write what the editor holds into `data`: a new entry, or the changes to
+/// the one it was opened on.
+fn apply_draft(data: &mut VaultData, draft: &Draft, name: &str) -> Result<()> {
+    let username = draft.username.trim().to_string();
+    let url = draft.url.trim().to_string();
+    let totp = draft.totp.trim().to_string();
+    let tags = draft.parsed_tags();
+    // Blank rows are the ones the user added and then thought better of;
+    // saving them would clutter every future edit.
+    let fields: Vec<CustomField> = draft.kept_fields().cloned().collect();
+
+    let Some(original) = draft.original_key.as_deref() else {
+        let mut entry = Entry::new(name);
+        entry.username = username;
+        entry.url = url;
+        entry.notes = draft.notes.clone();
+        entry.totp_secret = totp;
+        entry.tags = tags;
+        entry.fields = fields;
+        entry.set_password(draft.password.to_string());
+        return data.add(entry);
+    };
+
+    // Against the name as shown, not the key: the key ignores case, so a
+    // rename from "github" to "GitHub" was skipped and reported as saved.
+    if data.find(original).map(|entry| entry.name.as_str()) != Some(name) {
+        data.rename(original, name)?;
+    }
+    let entry = data
+        .find_mut(name)
+        .ok_or_else(|| Error::EntryNotFound(name.to_string()))?;
+
+    // Compared before assigning, because the log is only useful if "edited"
+    // means something changed. Opening a record and closing it again must
+    // not push the real events off the end.
+    let edited = entry.username != username
+        || entry.url != url
+        || entry.notes != draft.notes
+        || entry.totp_secret != totp
+        || entry.tags != tags
+        || entry.fields != fields;
+
+    entry.username = username;
+    entry.url = url;
+    entry.set_notes(draft.notes.clone());
+    entry.set_totp_secret(totp);
+    entry.tags = tags;
+    entry.fields = fields;
+    // Pushes the old value onto the history only if it changed.
+    let password_changed = entry.set_password(draft.password.to_string());
+    if edited {
+        entry.touch();
+    }
+
+    // A password change is its own line: it is the one edit worth spotting
+    // at a glance in a list of five hundred.
+    if password_changed {
+        data.record(AuditAction::PasswordChanged, name);
+    }
+    if edited {
+        data.record(AuditAction::EntryEdited, name);
+    }
+    Ok(())
 }
 
 fn delete_modal(app: &mut App, ui: &mut egui::Ui) {
@@ -1515,18 +1429,17 @@ fn delete_modal(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(theme::space::MD);
         ui.horizontal(|ui| {
             if widgets::danger_button(ui, palette, strings.common.delete).clicked() {
-                let outcome = app
+                let removed = app
                     .session
-                    .vault_mut()
-                    .map(|vault| vault.remove(&key).and_then(|_| vault.save()));
-                match outcome {
-                    Some(Ok(())) => {
+                    .unlocked_mut()
+                    .and_then(|vault| vault.commit(|data| data.remove(&key).map(drop)));
+                match removed {
+                    Ok(()) => {
                         app.status = Some(Status::success(strings.entry.deleted));
                         app.draft = None;
                         app.selected = None;
                     }
-                    Some(Err(e)) => app.status = Some(Status::error(strings, &e)),
-                    None => {}
+                    Err(e) => app.status = Some(Status::error(strings, &e)),
                 }
                 app.confirm_delete = None;
             }
@@ -1829,7 +1742,10 @@ mod tests {
             assert!(!commit_draft(&mut app), "the disk refused it");
         }
         let draft = app.draft.as_ref().expect("what was typed is kept");
-        assert_eq!(draft.original_key.as_deref(), Some("code host"));
+        assert_eq!(draft.name, "Code host");
+        let vault = app.session.vault().unwrap();
+        assert!(vault.data.find("code host").is_none(), "and the vault is as the disk has it");
+        assert!(!vault.is_dirty());
 
         assert!(commit_draft(&mut app), "and a second Save goes through");
         let vault = reopened(&home);
@@ -1867,17 +1783,29 @@ mod tests {
         leave_editor(&mut app, Leave::Close);
         assert_eq!(app.leaving, Some(Leave::Close));
         assert_eq!(*app.draft.as_ref().unwrap().password, "two", "not thrown away yet");
+
+        // The lock button is a way out too, and asks the same question.
+        app.leaving = None;
+        leave_editor(&mut app, Leave::Lock);
+        assert_eq!(app.leaving, Some(Leave::Lock));
+        assert!(app.session.is_unlocked(), "not locked over an unsaved edit");
+
+        // Answered "discard": the editor goes, and so does the lock.
+        app.leaving = None;
+        app.draft = None;
+        leave_editor(&mut app, Leave::Lock);
+        assert!(!app.session.is_unlocked());
     }
 
     #[test]
     fn a_file_added_twice_gets_a_second_name() {
         let taken = [
-            crate::model::Attachment::new("scan.pdf", b"one"),
-            crate::model::Attachment::new("scan (2).pdf", b"two"),
+            Attachment::new("scan.pdf", b"one"),
+            Attachment::new("scan (2).pdf", b"two"),
         ];
         assert_eq!(unique_attachment_name(&taken, "other.pdf"), "other.pdf");
         assert_eq!(unique_attachment_name(&taken, "scan.pdf"), "scan (3).pdf");
-        let bare = [crate::model::Attachment::new("README", b"x")];
+        let bare = [Attachment::new("README", b"x")];
         assert_eq!(unique_attachment_name(&bare, "README"), "README (2)");
     }
 

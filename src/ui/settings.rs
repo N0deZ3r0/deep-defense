@@ -463,13 +463,10 @@ fn change_master_password(app: &mut App) {
             app.settings.new_password_confirm = Zeroizing::new(String::new());
 
             if had_recovery {
-                // The pieces rebuild the old password, so they are now paper.
+                // The pieces rebuild the old password, so they are now paper,
+                // and the vault stopped vouching for them in the same save.
                 // Said as a warning, which does not fade on its own: someone
                 // who misses this keeps a recovery plan that cannot work.
-                if let Some(vault) = app.session.vault_mut() {
-                    vault.data.recovery_made_at = None;
-                    let _ = vault.save();
-                }
                 app.status = Some(Status::warn(
                     strings.recovery.stale_title,
                     strings.recovery.stale_body,
@@ -478,28 +475,7 @@ fn change_master_password(app: &mut App) {
                 app.status = Some(Status::success(strings.settings.changed));
             }
         }
-        Err(e) => app.status = Some(Status::error(strings, &said_as_refusal(strings, e))),
-    }
-}
-
-/// The vault's refusals about which password goes where, in the user's
-/// language. Anything else passes through as it came.
-fn said_as_refusal(strings: &Strings, e: crate::errors::Error) -> crate::errors::Error {
-    let known = [
-        (crate::vault::HIDDEN_SAME_PASSWORD, strings.hidden.same_password),
-        (crate::vault::HIDDEN_EXISTS, strings.hidden.exists),
-        (crate::vault::PASSWORD_OPENS_OTHER, strings.hidden.opens_other),
-    ];
-    let said = match &e {
-        crate::errors::Error::Vault(message) => known
-            .iter()
-            .find(|(refusal, _)| message.as_str() == *refusal)
-            .map(|(_, said)| *said),
-        _ => None,
-    };
-    match said {
-        Some(said) => crate::errors::Error::vault(said),
-        None => e,
+        Err(e) => app.status = Some(Status::error(strings, &e)),
     }
 }
 
@@ -658,10 +634,7 @@ fn create_hidden_vault(app: &mut App) {
 
     let outcome = (|| -> crate::errors::Result<()> {
         let secret = crate::crypto::combine_secret(&password, &keyfiles)?;
-        let vault = app
-            .session
-            .vault()
-            .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
+        let vault = app.session.unlocked()?;
         // The new vault is written and closed immediately: opening it here
         // would mean holding two vaults at once, and the user has to lock and
         // unlock anyway to prove the password works.
@@ -682,7 +655,7 @@ fn create_hidden_vault(app: &mut App) {
                 format!("{} {}", strings.hidden.created_body, strings.backups.hidden_note),
             ));
         }
-        Err(e) => app.status = Some(Status::error(strings, &said_as_refusal(strings, e))),
+        Err(e) => app.status = Some(Status::error(strings, &e)),
     }
 }
 
@@ -859,10 +832,7 @@ fn export_vault(app: &mut App, as_json: bool) {
     };
 
     let outcome = (|| -> crate::errors::Result<()> {
-        let vault = app
-            .session
-            .vault()
-            .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
+        let vault = app.session.unlocked()?;
         let text = if as_json {
             crate::portable::to_json(&vault.data)?
         } else {
@@ -886,36 +856,24 @@ fn export_vault(app: &mut App, as_json: bool) {
     }
 }
 
-/// Merge an export into the vault and save — or, if the save fails, take
-/// the new entries back out.
-///
-/// Left in after a failed save, they were listed as though imported, and an
-/// import too big for the slot made every later save fail with it until
-/// each of them was deleted by hand.
+/// Merge an export into the vault. Nothing is saved if nothing was added.
 fn merge_export(
     vault: &mut crate::vault::Vault,
     text: &str,
     json: bool,
     note: impl FnOnce(usize) -> String,
 ) -> crate::errors::Result<crate::portable::ImportReport> {
-    let before = vault.data.entries.len();
-    let previous_audit = vault.data.audit.clone();
-    let report = if json {
-        crate::portable::from_json(&mut vault.data, text)?
-    } else {
-        crate::portable::from_csv(&mut vault.data, text)?
-    };
-    if report.added > 0 {
-        vault
-            .data
-            .record(crate::model::AuditAction::EntryAdded, note(report.added));
-        if let Err(e) = vault.save() {
-            vault.data.entries.truncate(before);
-            vault.data.audit = previous_audit;
-            return Err(e);
+    vault.commit(|data| {
+        let report = if json {
+            crate::portable::from_json(data, text)?
+        } else {
+            crate::portable::from_csv(data, text)?
+        };
+        if report.added > 0 {
+            data.record(crate::model::AuditAction::EntryAdded, note(report.added));
         }
-    }
-    Ok(report)
+        Ok(report)
+    })
 }
 
 fn import_vault(app: &mut App) {
@@ -933,10 +891,7 @@ fn import_vault(app: &mut App) {
         let json = path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("json"));
-        let vault = app
-            .session
-            .vault_mut()
-            .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
+        let vault = app.session.unlocked_mut()?;
         merge_export(vault, &text, json, |added| {
             fill1(strings.portable.audit_import, added)
         })
@@ -1303,10 +1258,7 @@ fn apply_rebuild(
         };
         let own = combined(&app.settings.resize_own_password)?;
         let other = combined(&app.settings.resize_other_password)?;
-        let vault = app
-            .session
-            .vault_mut()
-            .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
+        let vault = app.session.unlocked_mut()?;
         vault.rebuild(new_capacity, new_kdf, own.as_ref(), other.as_ref())
     })();
 
@@ -1406,8 +1358,7 @@ fn export_anchor(app: &mut App) {
     };
     let outcome = app
         .session
-        .vault()
-        .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))
+        .unlocked()
         .and_then(|vault| vault.export_anchor(&path));
     match outcome {
         Ok(()) => {
@@ -1429,10 +1380,10 @@ fn import_anchor(app: &mut App) {
     else {
         return;
     };
-    let outcome = match app.session.vault_mut() {
-        Some(vault) => vault.import_anchor(&path),
-        None => Err(crate::errors::Error::vault("the vault is not open")),
-    };
+    let outcome = app
+        .session
+        .unlocked_mut()
+        .and_then(|vault| vault.import_anchor(&path));
     match outcome {
         Ok(()) => {
             app.status = Some(Status::warn(
@@ -1620,10 +1571,7 @@ fn create_recovery_shares(app: &mut App) {
     let outcome = (|| -> crate::errors::Result<Vec<Zeroizing<String>>> {
         // Verify before splitting: pieces of the wrong password would look
         // perfectly valid and fail only when they were the last hope.
-        let vault = app
-            .session
-            .vault()
-            .ok_or_else(|| crate::errors::Error::vault("the vault is not open"))?;
+        let vault = app.session.unlocked()?;
         let typed_secret = Secret::from_str(&typed);
         let secret =
             crate::crypto::combine_secret(&typed_secret, &app.session.config.keyfiles)?;
@@ -1645,12 +1593,15 @@ fn create_recovery_shares(app: &mut App) {
             app.show_recovery_shares = true;
             // Recorded so a later password change can say, precisely, that
             // these pieces have stopped working.
-            if let Some(vault) = app.session.vault_mut() {
-                vault.data.recovery_made_at = Some(crate::model::timestamp());
-                vault.data.record(crate::model::AuditAction::RecoveryCreated, "");
-                if let Err(e) = vault.save() {
-                    app.status = Some(Status::error(strings, &e));
-                }
+            let recorded = app.session.unlocked_mut().and_then(|vault| {
+                vault.commit(|data| {
+                    data.recovery_made_at = Some(crate::model::timestamp());
+                    data.record(crate::model::AuditAction::RecoveryCreated, "");
+                    Ok(())
+                })
+            });
+            if let Err(e) = recorded {
+                app.status = Some(Status::error(strings, &e));
             }
         }
         Err(e) => app.status = Some(Status::error(strings, &e)),

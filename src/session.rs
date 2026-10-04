@@ -46,7 +46,7 @@ use zeroize::Zeroize;
 use crate::clipboard::ClipboardManager;
 use crate::config::{Config, VAULT_FILENAME};
 use crate::crypto::{self, KdfParams, VaultHeader};
-use crate::errors::{CopyAt, Error, Result};
+use crate::errors::{CopyAt, Error, Refusal, Result};
 use crate::secret::Secret;
 use crate::vault::Vault;
 use crate::veracrypt::{MountPoint, VeraCrypt};
@@ -248,6 +248,16 @@ impl Session {
         self.open.as_mut().map(|o| &mut o.vault)
     }
 
+    /// The open vault, or the refusal to hand to whoever asked for it locked.
+    pub fn unlocked(&self) -> Result<&Vault> {
+        self.vault().ok_or_else(|| Refusal::NotOpen.into())
+    }
+
+    /// The open vault, to change.
+    pub fn unlocked_mut(&mut self) -> Result<&mut Vault> {
+        self.vault_mut().ok_or_else(|| Refusal::NotOpen.into())
+    }
+
     pub fn open_vault_mut(&mut self) -> Option<&mut OpenVault> {
         self.open.as_mut()
     }
@@ -317,10 +327,7 @@ impl Session {
         new_password: &Secret,
         params: KdfParams,
     ) -> Result<()> {
-        let open = self
-            .open
-            .as_mut()
-            .ok_or_else(|| Error::vault("the vault is not open"))?;
+        let open = self.open.as_mut().ok_or(Refusal::NotOpen)?;
         change_master_password(open, &mut self.config, new_password, params)
     }
 
@@ -337,7 +344,7 @@ impl Session {
     pub fn restore_backup_and_lock(&mut self, index: usize) -> Result<()> {
         self.clipboard.clear_now();
         let Some(mut open) = self.open.take() else {
-            return Err(Error::vault("the vault is not open"));
+            return Err(Refusal::NotOpen.into());
         };
         let path = open.vault.path.clone();
         let source = crate::vault::backup_path(&path, index);
@@ -367,11 +374,18 @@ impl Session {
         restored
     }
 
-    /// Save pending changes, close the vault and dismount the container.
+    /// Save what is pending, close the vault and dismount the container.
     ///
-    /// Returns an error only if *saving* failed. A stubborn dismount is
-    /// handled by forcing it: by that point the secrets are already gone from
-    /// memory, so the volume is just a mounted drive with ciphertext on it.
+    /// Locks whether or not the save works: this is what the idle timer and
+    /// the screen lock call, and neither can wait for a disk to come back.
+    /// That costs nothing the user typed. Every edit goes through
+    /// [`Vault::commit`], which saves it or takes it back, so all a lock can
+    /// find pending is the vault's own bookkeeping — which computers it has
+    /// been on, the revision to outrank — and that is redone at the next open.
+    ///
+    /// Returns an error only if that save failed. A stubborn dismount is
+    /// handled by forcing it: by then the secrets are gone from memory, and
+    /// the volume is a mounted drive with ciphertext on it.
     pub fn lock(&mut self) -> Result<()> {
         self.clipboard.clear_now();
         let Some(mut open) = self.open.take() else {

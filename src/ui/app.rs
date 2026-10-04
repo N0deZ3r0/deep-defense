@@ -229,7 +229,6 @@ impl Draft {
                 || !self.totp.trim().is_empty()
                 || self.kept_fields().next().is_some();
         };
-        let fields: Vec<_> = self.kept_fields().collect();
         self.name.trim() != entry.name.trim()
             || self.username.trim() != entry.username.trim()
             || *self.password != entry.password
@@ -237,10 +236,7 @@ impl Draft {
             || self.notes != entry.notes
             || self.totp.trim() != entry.totp_secret.trim()
             || self.parsed_tags() != entry.tags
-            || fields.len() != entry.fields.len()
-            || fields.iter().zip(&entry.fields).any(|(now, before)| {
-                now.name != before.name || now.value != before.value || now.secret != before.secret
-            })
+            || self.kept_fields().ne(entry.fields.iter())
     }
 }
 
@@ -253,6 +249,10 @@ pub enum Leave {
     New,
     /// Close the editor.
     Close,
+    /// Lock the vault.
+    Lock,
+    /// Close the window.
+    Quit,
 }
 
 pub struct App {
@@ -313,6 +313,9 @@ pub struct App {
     /// Debounced watch on the desktop being locked.
     lock_watcher: LockWatcher,
     last_lock_check: Instant,
+    /// The window may go: nothing unsaved is left in it, or the user has
+    /// said what to do with what was.
+    closing: bool,
 }
 
 impl App {
@@ -368,6 +371,7 @@ impl App {
             restoring_newer: false,
             focus_search: false,
             window_theme: None,
+            closing: false,
             lock_watcher: LockWatcher::default(),
             last_lock_check: Instant::now(),
         }
@@ -556,12 +560,24 @@ impl App {
 
     // ----------------------------------------------------------------- lock
 
+    /// Lock because the user asked.
     pub fn lock_now(&mut self) {
         let strings = self.strings();
-        match self.session.lock() {
-            Ok(()) => self.status = Some(Status::info(strings.shell.locked_notice)),
-            Err(e) => self.status = Some(Status::error(strings, &e)),
-        }
+        let notice = if self.session.uses_container() {
+            strings.shell.locked_notice
+        } else {
+            strings.shell.locked_plain
+        };
+        self.lock_with(Status::info(notice));
+    }
+
+    /// Lock, and leave `notice` on the lock screen — unless the save on the
+    /// way out failed, which is said instead. The idle timer and the screen
+    /// lock used to put their own notice over that error, and a save that
+    /// failed went by without a word.
+    fn lock_with(&mut self, notice: Status) {
+        let strings = self.strings();
+        let failed = self.session.lock().err();
         self.screen = Screen::Locked;
         self.selected = None;
         self.search.clear();
@@ -583,6 +599,28 @@ impl App {
         self.show_recovery_shares = false;
         self.settings = settings::SettingsState::new(&self.session.config);
         self.clear_inputs();
+        self.status = Some(match failed {
+            Some(e) => Status::error(strings, &e),
+            None => notice,
+        });
+    }
+
+    /// Closing the window is a way out of the editor like any other, and it
+    /// is asked about first like any other.
+    fn guard_window_close(&mut self, ctx: &egui::Context) {
+        if self.closing {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && self.draft_is_unsaved() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            entries::leave_editor(self, Leave::Quit);
+        }
+    }
+
+    /// Let the window close, now that nothing in it is waiting on an answer.
+    pub fn close_window(&mut self) {
+        self.closing = true;
     }
 
     /// Lock when the desktop does, if the user asked for that.
@@ -615,8 +653,7 @@ impl App {
                 strings.shell.screen_locked_title,
                 strings.shell.screen_locked_body,
             );
-            self.lock_now();
-            self.status = Some(Status::warn(title, body));
+            self.lock_with(Status::warn(title, body));
         }
     }
 
@@ -627,8 +664,7 @@ impl App {
                 strings.shell.autolocked_title,
                 strings.shell.autolocked_body,
             );
-            self.lock_now();
-            self.status = Some(Status::warn(title, body));
+            self.lock_with(Status::warn(title, body));
         }
     }
 
@@ -679,8 +715,10 @@ impl App {
                 self.focus_search = true;
             }
             if l {
-                self.lock_now();
-                return;
+                entries::leave_editor(self, Leave::Lock);
+                if !self.session.is_unlocked() {
+                    return;
+                }
             }
             if s {
                 // The hint on the Save button says Ctrl+S, so it has to do
@@ -819,8 +857,10 @@ impl App {
             .on_hover_text("Ctrl+L")
             .clicked()
         {
-            self.lock_now();
-            return;
+            entries::leave_editor(self, Leave::Lock);
+            if !self.session.is_unlocked() {
+                return;
+            }
         }
         if widgets::tool_button(
             ui,
@@ -1140,6 +1180,7 @@ impl App {
         self.check_autolock();
         self.check_screen_lock();
         self.handle_shortcuts(ui.ctx());
+        self.guard_window_close(ui.ctx());
 
         // The title bar has to be set from inside a frame, and only when it
         // changes - the command is a round trip to the window manager.
@@ -1209,8 +1250,9 @@ impl eframe::App for App {
     /// allocated GPU resources can release them. We allocate none — the
     /// parameter exists because the renderer's trait says so.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Never leave a decrypted volume mounted behind us.
-        self.session.emergency_lock();
+        // Never leave a decrypted volume mounted behind us — and write out
+        // what was pending first, which the bare teardown does not.
+        let _ = self.session.lock();
     }
 }
 

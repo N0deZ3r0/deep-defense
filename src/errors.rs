@@ -36,10 +36,75 @@ pub enum Error {
 
     Config(String),
 
+    /// Something the program would not do, or could not, said in the user's
+    /// own language. See [`Refusal`].
+    Refused(Refusal),
+
     Io {
         path: PathBuf,
         source: std::io::Error,
     },
+}
+
+/// What the program would not do, or could not, in terms a person can act on.
+///
+/// The variants above carry a sentence written once, in English. That suits a
+/// detail handed up from a library, and it is wrong for anything a person
+/// runs into by using the program: a Russian screen then answers in English.
+/// Those cases live here, as data rather than prose. The words sit in `i18n`
+/// with every other string on screen, and code that needs to know which
+/// refusal it was asks the type, not the sentence.
+#[derive(Debug)]
+pub enum Refusal {
+    /// Something needed the vault open, and it is locked.
+    NotOpen,
+    /// An entry was to be saved without a name to find it by.
+    EntryNeedsName,
+    /// A hidden vault was asked for under the password of the vault it would
+    /// sit behind, where no unlock could ever reach it.
+    HiddenSamePassword,
+    /// A hidden vault already answers to that password.
+    HiddenExists,
+    /// The new master password already opens the other vault in the file.
+    PasswordOpensOther,
+    /// The settings file would not parse. `moved_to` is where it was put, out
+    /// of the way of the defaults that are saved next.
+    SettingsUnreadable {
+        path: PathBuf,
+        reason: String,
+        moved_to: Option<PathBuf>,
+    },
+}
+
+impl Refusal {
+    /// The sentence, in the language `strings` is in.
+    pub fn text(&self, strings: &crate::i18n::Strings) -> String {
+        use crate::i18n::{fill2, fill3};
+        let said = &strings.errors;
+        match self {
+            Refusal::NotOpen => said.not_open.to_owned(),
+            Refusal::EntryNeedsName => strings.entry.needs_name.to_owned(),
+            Refusal::HiddenSamePassword => strings.hidden.same_password.to_owned(),
+            Refusal::HiddenExists => strings.hidden.exists.to_owned(),
+            Refusal::PasswordOpensOther => strings.hidden.opens_other.to_owned(),
+            Refusal::SettingsUnreadable {
+                path,
+                reason,
+                moved_to: Some(aside),
+            } => fill3(said.settings_moved, path.display(), reason, aside.display()),
+            Refusal::SettingsUnreadable {
+                path,
+                reason,
+                moved_to: None,
+            } => fill2(said.settings_unreadable, path.display(), reason),
+        }
+    }
+}
+
+impl From<Refusal> for Error {
+    fn from(refusal: Refusal) -> Self {
+        Error::Refused(refusal)
+    }
 }
 
 /// What showed a vault file to be older than it should be.
@@ -119,6 +184,7 @@ impl fmt::Display for Error {
                 ),
             },
             Error::Config(msg) => write!(f, "Configuration: {msg}"),
+            Error::Refused(refusal) => write!(f, "{}", refusal.text(&crate::i18n::EN)),
             Error::Io { path, source } => write!(f, "{}: {source}", path.display()),
         }
     }
@@ -187,6 +253,7 @@ impl Error {
                 }
             },
             Error::Config(msg) => fill1(e.config, msg),
+            Error::Refused(refusal) => refusal.text(strings),
             Error::Io { path, source } => fill2(e.io, path.display(), source),
         }
     }
@@ -217,7 +284,7 @@ mod tests {
             Error::Authentication,
             Error::crypto("the tag did not verify"),
             Error::format("that is not a share"),
-            Error::vault("the vault is not open"),
+            Error::vault("cannot serialise the vault"),
             Error::EntryNotFound("Bank".into()),
             Error::EntryExists("Bank".into()),
             Error::veracrypt("the volume did not mount"),
@@ -249,6 +316,44 @@ mod tests {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
             ),
         ]
+        .into_iter()
+        .chain(one_of_each_refusal().into_iter().map(Error::from))
+        .collect()
+    }
+
+    /// One of every refusal, in each of the shapes that reads differently.
+    fn one_of_each_refusal() -> Vec<Refusal> {
+        vec![
+            Refusal::NotOpen,
+            Refusal::EntryNeedsName,
+            Refusal::HiddenSamePassword,
+            Refusal::HiddenExists,
+            Refusal::PasswordOpensOther,
+            Refusal::SettingsUnreadable {
+                path: std::path::PathBuf::from("C:/app/config.json"),
+                reason: "expected value at line 1".into(),
+                moved_to: Some(std::path::PathBuf::from("C:/app/config.unreadable.json")),
+            },
+            Refusal::SettingsUnreadable {
+                path: std::path::PathBuf::from("C:/app/config.json"),
+                reason: "expected value at line 1".into(),
+                moved_to: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_refusal_names_what_it_is_about_in_both_languages() {
+        for strings in [&EN, &RU] {
+            let moved = Refusal::SettingsUnreadable {
+                path: std::path::PathBuf::from("C:/app/config.json"),
+                reason: "expected value".into(),
+                moved_to: Some(std::path::PathBuf::from("C:/app/config.unreadable.json")),
+            }
+            .text(strings);
+            assert!(moved.contains("config.json") && moved.contains("expected value"));
+            assert!(moved.contains("config.unreadable.json"), "{moved}");
+        }
     }
 
     #[test]

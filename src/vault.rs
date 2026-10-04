@@ -15,22 +15,12 @@ use sha2::{Digest, Sha256};
 use crate::config::{app_dir, ensure_app_dir};
 use crate::crypto::{self, KdfParams};
 use crate::slots::{self, SlotFile};
-use crate::errors::{CopyAt, Error, Evidence, Result};
+use crate::errors::{CopyAt, Error, Evidence, Refusal, Result};
 use crate::model::{AuditAction, Entry, VaultData};
 use crate::secret::{Key, Secret};
 
 /// How many previous vault files to keep beside the current one.
 const BACKUP_COUNT: usize = 5;
-
-/// Why a password was turned down for a second vault in the same file.
-///
-/// Public so the interface can tell these apart from other failures and say
-/// them in the user's language.
-pub const HIDDEN_SAME_PASSWORD: &str =
-    "the hidden vault needs a password of its own; that one already opens this vault";
-pub const HIDDEN_EXISTS: &str = "a hidden vault already exists under that password";
-pub const PASSWORD_OPENS_OTHER: &str =
-    "that password already opens the other vault in this file, and an unlock opens only one";
 
 const ANCHOR_FILENAME: &str = "revision.anchor";
 const ANCHOR_CONTEXT: &[u8] = b"deep-defense/rollback-anchor/v1";
@@ -1470,50 +1460,51 @@ impl Vault {
 
     // -------------------------------------------------------------- mutation
 
+    /// Change the vault and save it — or change nothing.
+    ///
+    /// `change` is handed the data to work on. If it refuses, or if the save
+    /// that follows fails, the data goes back exactly as it was. Memory and
+    /// disk therefore never drift apart: nothing on screen is a change that
+    /// lasts only until the window closes, and a vault that would not save
+    /// once is not left holding something that stops every save after it.
+    ///
+    /// A change that turns out to change nothing is not saved at all, so
+    /// pressing Save on an entry that was only looked at does not push a real
+    /// backup off the end of the row.
+    pub fn commit<T>(&mut self, change: impl FnOnce(&mut VaultData) -> Result<T>) -> Result<T> {
+        let before = self.data.clone();
+        let was_dirty = self.dirty;
+        let outcome = change(&mut self.data).and_then(|value| {
+            if self.data != before {
+                self.dirty = true;
+                self.save()?;
+            }
+            Ok(value)
+        });
+        if outcome.is_err() {
+            self.data = before;
+            self.dirty = was_dirty;
+        }
+        outcome
+    }
+
+    /// Add an entry, to be written by the next save.
     pub fn add(&mut self, entry: Entry) -> Result<()> {
-        if entry.name.trim().is_empty() {
-            return Err(Error::vault("an entry needs a name"));
-        }
-        if self.data.find(&entry.name).is_some() {
-            return Err(Error::EntryExists(entry.name.clone()));
-        }
-        self.data.record(AuditAction::EntryAdded, &entry.name);
-        self.data.entries.push(entry);
+        self.data.add(entry)?;
         self.dirty = true;
         Ok(())
     }
 
+    /// Remove an entry, to be written by the next save.
     pub fn remove(&mut self, name: &str) -> Result<Entry> {
-        let index = self
-            .data
-            .position(name)
-            .ok_or_else(|| Error::EntryNotFound(name.to_string()))?;
-        let removed = self.data.entries.remove(index);
-        self.data.record(AuditAction::EntryDeleted, &removed.name);
+        let removed = self.data.remove(name)?;
         self.dirty = true;
         Ok(removed)
     }
 
-    /// Rename, rejecting a collision with a different existing entry.
+    /// Rename an entry, to be written by the next save.
     pub fn rename(&mut self, old: &str, new: &str) -> Result<()> {
-        let new_key = new.trim().to_lowercase();
-        if new_key.is_empty() {
-            return Err(Error::vault("an entry needs a name"));
-        }
-        let index = self
-            .data
-            .position(old)
-            .ok_or_else(|| Error::EntryNotFound(old.to_string()))?;
-        if let Some(clash) = self.data.position(new) {
-            if clash != index {
-                return Err(Error::EntryExists(new.to_string()));
-            }
-        }
-        let former = self.data.entries[index].name.clone();
-        self.data.entries[index].name = new.trim().to_string();
-        self.data.entries[index].touch();
-        self.data
-            .record(AuditAction::EntryRenamed, format!("{former} → {new}"));
+        self.data.rename(old, new)?;
         self.dirty = true;
         Ok(())
     }
@@ -1529,9 +1520,15 @@ impl Vault {
     /// therefore fixed when the file is created.
     pub fn change_master(&mut self, new_secret: &Secret) -> Result<()> {
         self.refuse_shared_password(new_secret)?;
-        let previous_audit = self.data.audit.clone();
-        self.data.record(AuditAction::MasterPasswordChanged, "");
+        // Derived before anything is changed, so that failing here leaves
+        // nothing to undo.
         let (new_key, new_salt) = self.file.prepare_slot(new_secret)?;
+        let previous_audit = self.data.audit.clone();
+        // Recovery pieces rebuild the password they were cut from. Under a
+        // new one they open nothing, and the vault stops saying they exist
+        // in the same save that makes it so.
+        let previous_recovery = self.data.recovery_made_at.take();
+        self.data.record(AuditAction::MasterPasswordChanged, "");
         let old_key = std::mem::replace(&mut self.master_key, new_key);
         let old_salt = std::mem::replace(&mut self.salt, new_salt);
 
@@ -1556,6 +1553,7 @@ impl Vault {
                 self.master_key = old_key;
                 self.salt = old_salt;
                 self.data.audit = previous_audit;
+                self.data.recovery_made_at = previous_recovery;
                 Err(e)
             }
         }
@@ -1576,7 +1574,7 @@ impl Vault {
             .filter(|&index| index != self.slot)
             .any(|index| current.slot_opens(index, secret));
         if shared {
-            return Err(Error::vault(PASSWORD_OPENS_OTHER));
+            return Err(Refusal::PasswordOpensOther.into());
         }
         Ok(())
     }
@@ -1594,7 +1592,7 @@ impl Vault {
         // Under this vault's own password the new one could never be opened:
         // this slot would answer first, every time.
         if self.secret_opens_this_slot(secret) {
-            return Err(Error::vault(HIDDEN_SAME_PASSWORD));
+            return Err(Refusal::HiddenSamePassword.into());
         }
         // Against the file on disk: a hidden vault may have been created
         // since this one was opened.
@@ -1605,7 +1603,7 @@ impl Vault {
             self.file.clone()
         });
         if current.slot_opens(slots::HIDDEN_SLOT, secret) {
-            return Err(Error::vault(HIDDEN_EXISTS));
+            return Err(Refusal::HiddenExists.into());
         }
         Vault::create_in_slot(
             &self.path,
@@ -1911,7 +1909,78 @@ mod tests {
         let secret = Secret::from_str("hidden");
         let _first = decoy.create_hidden(&secret).unwrap();
         let err = decoy.create_hidden(&secret).expect_err("already taken");
-        assert!(matches!(err, Error::Vault(ref m) if m == HIDDEN_EXISTS));
+        assert!(matches!(err, Error::Refused(Refusal::HiddenExists)));
+    }
+
+    #[test]
+    fn a_commit_that_cannot_be_saved_changes_nothing() {
+        let dir = TempDir::new("commit-undo");
+        let mut vault = small_vault(&dir.vault(), &Secret::from_str("pw"));
+        vault.add(sample_entry("Kept", "as it was")).unwrap();
+        vault.save().unwrap();
+        let before = vault.data.clone();
+
+        // Refused by the change itself: a name already taken.
+        let refused = vault.commit(|data| {
+            data.find_mut("kept").unwrap().notes = "half an edit".into();
+            data.add(sample_entry("Kept", "again"))
+        });
+        assert!(matches!(refused, Err(Error::EntryExists(_))));
+        assert!(vault.data == before, "even the half that was applied is undone");
+
+        // Refused by the disk.
+        {
+            let _armed = faults::arm("save", "write");
+            let failed = vault.commit(|data| data.add(sample_entry("New", "never written")));
+            assert!(failed.is_err());
+        }
+        assert!(vault.data == before);
+        assert!(!vault.is_dirty(), "nothing is left waiting for the next save");
+
+        vault.commit(|data| data.add(sample_entry("New", "written"))).unwrap();
+        drop(vault);
+        let reopened = Vault::open(&dir.vault(), &Secret::from_str("pw"), true).unwrap();
+        assert_eq!(reopened.data.find("new").unwrap().password, "written");
+    }
+
+    #[test]
+    fn a_commit_that_changes_nothing_is_not_a_save() {
+        // Each save moves the backups along one. Five presses of Save on an
+        // entry nobody touched used to be five copies of the same file where
+        // the history had been.
+        let dir = TempDir::new("commit-noop");
+        let mut vault = small_vault(&dir.vault(), &Secret::from_str("pw"));
+        vault.add(sample_entry("Kept", "as it was")).unwrap();
+        vault.save().unwrap();
+        let revision = vault.data.revision;
+        let backups = vault.available_backups().len();
+
+        let found = vault.commit(|data| Ok(data.find("kept").is_some())).unwrap();
+        assert!(found, "what the change returns comes back");
+        assert_eq!(vault.data.revision, revision);
+        assert_eq!(vault.available_backups().len(), backups);
+    }
+
+    #[test]
+    fn changing_the_master_password_retires_the_recovery_pieces() {
+        let dir = TempDir::new("rekey-recovery");
+        let mut vault = small_vault(&dir.vault(), &Secret::from_str("old"));
+        vault.data.recovery_made_at = Some("2026-01-01T00:00:00Z".into());
+        vault.mark_dirty();
+        vault.save().unwrap();
+
+        // A change that fails leaves them standing: the old password is
+        // still the password, and its pieces still rebuild it.
+        {
+            let _armed = faults::arm("save", "write");
+            assert!(vault.change_master(&Secret::from_str("new")).is_err());
+        }
+        assert!(vault.data.recovery_made_at.is_some());
+
+        vault.change_master(&Secret::from_str("new")).unwrap();
+        drop(vault);
+        let reopened = Vault::open(&dir.vault(), &Secret::from_str("new"), true).unwrap();
+        assert!(reopened.data.recovery_made_at.is_none());
     }
 
     #[test]
@@ -1923,7 +1992,7 @@ mod tests {
         let decoy = small_vault(&dir.vault(), &secret);
 
         let err = decoy.create_hidden(&secret).expect_err("must be refused");
-        assert!(matches!(err, Error::Vault(ref m) if m == HIDDEN_SAME_PASSWORD));
+        assert!(matches!(err, Error::Refused(Refusal::HiddenSamePassword)));
 
         let reopened = Vault::open(&dir.vault(), &secret, true).unwrap();
         assert!(!reopened.is_hidden());
@@ -1943,9 +2012,9 @@ mod tests {
         // From either side, taking the other's password would hide the
         // hidden vault behind the decoy for good.
         let err = decoy.change_master(&hidden_pw).expect_err("decoy side");
-        assert!(matches!(err, Error::Vault(ref m) if m == PASSWORD_OPENS_OTHER));
+        assert!(matches!(err, Error::Refused(Refusal::PasswordOpensOther)));
         let err = hidden.change_master(&decoy_pw).expect_err("hidden side");
-        assert!(matches!(err, Error::Vault(ref m) if m == PASSWORD_OPENS_OTHER));
+        assert!(matches!(err, Error::Refused(Refusal::PasswordOpensOther)));
         drop(hidden);
         drop(decoy);
 

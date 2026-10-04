@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::errors::{Error, Refusal, Result};
+
 pub const SCHEMA_VERSION: u32 = 1;
 /// How many previous passwords to keep per entry. Enough to undo a bad edit,
 /// few enough that a stale password does not linger for years.
@@ -25,7 +27,7 @@ pub fn age_days(stamp: &str) -> Option<i64> {
 }
 
 /// A password this entry used to have, kept so a bad edit is recoverable.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoricPassword {
     pub password: String,
     #[serde(default = "now")]
@@ -49,7 +51,10 @@ impl std::fmt::Debug for HistoricPassword {
 }
 
 /// One credential.
-#[derive(Clone, Serialize, Deserialize)]
+///
+/// Comparable, like everything else a vault holds, so that a change can be
+/// told from a save of the same thing. See `Vault::commit`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub name: String,
     #[serde(default)]
@@ -158,6 +163,19 @@ impl Entry {
         self.updated_at = now();
     }
 
+    /// Replace the notes, wiping the ones that were there. Assigning to the
+    /// field would free them as they are.
+    pub fn set_notes(&mut self, notes: String) {
+        self.notes.zeroize();
+        self.notes = notes;
+    }
+
+    /// Replace the authenticator seed, wiping the one that was there.
+    pub fn set_totp_secret(&mut self, secret: String) {
+        self.totp_secret.zeroize();
+        self.totp_secret = secret;
+    }
+
     /// Replace the password, pushing the old one onto the history.
     /// Returns whether the password actually changed, so the caller can log
     /// it without having to compare the strings a second time.
@@ -262,7 +280,7 @@ fn starts_with_folded(haystack: &str, needle: &str) -> bool {
 
 /// A named value beside the password: a PIN, an account number, the answer to
 /// a security question.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct CustomField {
     pub name: String,
     pub value: String,
@@ -294,7 +312,7 @@ impl std::fmt::Debug for CustomField {
 /// the same two ciphers as the passwords and never touches the disk in the
 /// clear. The slot has a fixed capacity, so attachments are what will fill a
 /// vault up — the UI shows how much room is left.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attachment {
     pub name: String,
     /// Base64 of the file's bytes.
@@ -364,7 +382,7 @@ pub enum AuditAction {
 /// Each record carries the hash of the one before it, so the log cannot be
 /// edited after the fact: removing or altering a line breaks every hash that
 /// follows, and the break is visible without needing a copy of the original.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AuditRecord {
     pub at: String,
     pub action: AuditAction,
@@ -415,7 +433,7 @@ impl std::fmt::Debug for MachineKey {
 }
 
 /// The whole decrypted payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VaultData {
     #[serde(default = "default_schema")]
     pub schema_version: u32,
@@ -542,6 +560,49 @@ impl VaultData {
     pub fn position(&self, name: &str) -> Option<usize> {
         let key = name.trim().to_lowercase();
         self.entries.iter().position(|e| e.key() == key)
+    }
+
+    /// Add an entry, refusing one without a name or with a name already taken.
+    pub fn add(&mut self, entry: Entry) -> Result<()> {
+        if entry.name.trim().is_empty() {
+            return Err(Refusal::EntryNeedsName.into());
+        }
+        if self.find(&entry.name).is_some() {
+            return Err(Error::EntryExists(entry.name.clone()));
+        }
+        self.record(AuditAction::EntryAdded, &entry.name);
+        self.entries.push(entry);
+        Ok(())
+    }
+
+    /// Take an entry out, and hand it back.
+    pub fn remove(&mut self, name: &str) -> Result<Entry> {
+        let index = self
+            .position(name)
+            .ok_or_else(|| Error::EntryNotFound(name.to_string()))?;
+        let removed = self.entries.remove(index);
+        self.record(AuditAction::EntryDeleted, &removed.name);
+        Ok(removed)
+    }
+
+    /// Rename, refusing a name that belongs to a different entry. The same
+    /// entry's own name in other capitals is not a different entry.
+    pub fn rename(&mut self, old: &str, new: &str) -> Result<()> {
+        let new = new.trim();
+        if new.is_empty() {
+            return Err(Refusal::EntryNeedsName.into());
+        }
+        let index = self
+            .position(old)
+            .ok_or_else(|| Error::EntryNotFound(old.to_string()))?;
+        if self.position(new).is_some_and(|clash| clash != index) {
+            return Err(Error::EntryExists(new.to_string()));
+        }
+        let entry = &mut self.entries[index];
+        let former = std::mem::replace(&mut entry.name, new.to_string());
+        entry.touch();
+        self.record(AuditAction::EntryRenamed, format!("{former} → {new}"));
+        Ok(())
     }
 
     /// Entries in a stable, case-insensitive order, as indices into `entries`.

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::KdfParams;
-use crate::errors::{Error, Result};
+use crate::errors::{Error, Refusal, Result};
 use crate::i18n::Lang;
 use crate::ui::theme::Appearance;
 
@@ -224,19 +224,13 @@ impl Config {
     fn set_aside(path: &Path, reason: &str) -> Error {
         let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
         let aside = path.with_file_name(format!("config.unreadable-{stamp}.json"));
-        if std::fs::rename(path, &aside).is_ok() {
-            Error::config(format!(
-                "{} could not be read ({reason}). It was moved to {}, and the settings \
-                 start from their defaults; copy back from it anything you need.",
-                path.display(),
-                aside.display()
-            ))
-        } else {
-            Error::config(format!(
-                "{} could not be read ({reason}). Delete it to start from defaults.",
-                path.display()
-            ))
+        let moved_to = std::fs::rename(path, &aside).is_ok().then_some(aside);
+        Refusal::SettingsUnreadable {
+            path: path.to_path_buf(),
+            reason: reason.to_string(),
+            moved_to,
         }
+        .into()
     }
 
     pub fn save(&self) -> Result<()> {

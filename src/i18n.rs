@@ -316,6 +316,11 @@ pub struct ErrorsText {
     pub copy_mirror: &'static str,
     /// "{}" a path, "{}" the operating system's own message.
     pub io: &'static str,
+    pub not_open: &'static str,
+    /// "{}" the settings file, "{}" what is wrong with it, "{}" where it went.
+    pub settings_moved: &'static str,
+    /// "{}" the settings file, "{}" what is wrong with it.
+    pub settings_unreadable: &'static str,
 }
 pub struct AttachmentsText {
     pub section: &'static str,
@@ -424,6 +429,8 @@ pub struct Shell {
     pub busy_note: &'static str,
     pub error_title: &'static str,
     pub locked_notice: &'static str,
+    /// The same, for a vault that was never in a container.
+    pub locked_plain: &'static str,
     pub autolocked_title: &'static str,
     pub autolocked_body: &'static str,
     pub screen_locked_title: &'static str,
@@ -721,6 +728,7 @@ pub static EN: Strings = Strings {
         busy_note: "Argon2id is deliberately slow — that is what makes guessing expensive.",
         error_title: "Something went wrong",
         locked_notice: "Locked. The container is dismounted.",
+        locked_plain: "Locked.",
         autolocked_title: "Locked automatically",
         screen_locked_title: "Locked with the desktop",
         screen_locked_body: "The screen locked, so the vault was saved and closed straight away rather than waiting out the idle timer.",
@@ -1037,7 +1045,8 @@ pub static EN: Strings = Strings {
         created_title: "The hidden vault exists",
         created_body: "Lock, then unlock with the new password to open it. This vault is \
                        unchanged and still opens with the password you used to get here.",
-        same_password: "It must differ from this vault's password.",
+        same_password: "The hidden vault needs a password of its own: that one already \
+                        opens this vault.",
         exists: "A hidden vault already exists under that password.",
         replaces_existing_title: "If a hidden vault already exists, this replaces it",
         replaces_existing_body: "The program cannot see a hidden vault made under a different password — that is what makes it hidden. So making a second one overwrites the first, without asking and without any way back. If you have made one already, open it with its own password rather than creating another.",
@@ -1099,6 +1108,10 @@ pub static EN: Strings = Strings {
         copy_backup: "backup {} beside the vault",
         copy_mirror: "the copy in the mirror ({})",
         io: "{}: {}",
+        not_open: "The vault is not open.",
+        settings_moved: "{} could not be read ({}). It was moved to {}, and the settings \
+                         start from their defaults; copy back from it anything you need.",
+        settings_unreadable: "{} could not be read ({}). Delete it to start from defaults.",
     },
 
     portable: PortableText {
@@ -1315,6 +1328,7 @@ pub static RU: Strings = Strings {
         busy_note: "Argon2id медленный намеренно — именно это делает перебор дорогим.",
         error_title: "Что-то пошло не так",
         locked_notice: "Заблокировано. Контейнер размонтирован.",
+        locked_plain: "Заблокировано.",
         autolocked_title: "Автоблокировка",
         screen_locked_title: "Заблокировано вместе с экраном",
         screen_locked_body: "Экран заблокировался, поэтому хранилище сохранено и закрыто сразу, не дожидаясь таймера простоя.",
@@ -1631,7 +1645,8 @@ pub static RU: Strings = Strings {
         created_title: "Скрытое хранилище создано",
         created_body: "Заблокируйте и откройте новым паролем. Это хранилище не изменилось \
                        и по-прежнему открывается тем паролем, которым вы вошли.",
-        same_password: "Он должен отличаться от пароля этого хранилища.",
+        same_password: "Скрытому хранилищу нужен свой пароль: этот уже открывает \
+                        текущее хранилище.",
         exists: "Скрытое хранилище с таким паролем уже существует.",
         replaces_existing_title: "Если скрытое хранилище уже есть, оно будет заменено",
         replaces_existing_body: "Программа не видит скрытого хранилища, созданного под другим паролем, — именно это делает его скрытым. Поэтому создание второго затрёт первое без вопросов и без возможности вернуть. Если вы уже делали скрытое хранилище — откройте его своим паролем, а не создавайте ещё одно.",
@@ -1691,6 +1706,11 @@ pub static RU: Strings = Strings {
         copy_backup: "резервная копия № {} рядом с хранилищем",
         copy_mirror: "копия в зеркале ({})",
         io: "{}: {}",
+        not_open: "Хранилище не открыто.",
+        settings_moved: "Не удалось прочитать {} ({}). Файл перемещён в {}, а настройки начаты \
+                         с исходных; перенесите из него всё, что нужно.",
+        settings_unreadable: "Не удалось прочитать {} ({}). Удалите его, чтобы начать с \
+                              исходных настроек.",
     },
 
     portable: PortableText {
@@ -1857,7 +1877,7 @@ mod tests {
     fn placeholders_match_between_languages() {
         // A translation that drops a "{}" silently loses the number it was
         // supposed to show, and one that adds an extra leaves "{}" on screen.
-        let pairs: [(&str, &str, &str); 53] = [
+        let pairs: [(&str, &str, &str); 55] = [
             ("shell.locks_in", EN.shell.locks_in, RU.shell.locks_in),
             (
                 "shell.clipboard_clears_in",
@@ -1919,6 +1939,12 @@ mod tests {
             ("errors.copy_mirror", EN.errors.copy_mirror, RU.errors.copy_mirror),
             ("shell.newer_body", EN.shell.newer_body, RU.shell.newer_body),
             ("entry.unsaved_body", EN.entry.unsaved_body, RU.entry.unsaved_body),
+            ("errors.settings_moved", EN.errors.settings_moved, RU.errors.settings_moved),
+            (
+                "errors.settings_unreadable",
+                EN.errors.settings_unreadable,
+                RU.errors.settings_unreadable,
+            ),
         ];
         for (name, en, ru) in pairs {
             assert_eq!(
