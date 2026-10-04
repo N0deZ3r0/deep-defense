@@ -49,7 +49,7 @@ use crate::crypto::{self, KdfParams, VaultHeader};
 use crate::errors::{CopyAt, Error, Refusal, Result};
 use crate::secret::Secret;
 use crate::vault::Vault;
-use crate::veracrypt::{MountPoint, VeraCrypt};
+use crate::veracrypt::{MountPoint, NewVolume, VeraCrypt};
 
 const SIDECAR_EXTENSION: &str = "ddmeta";
 /// VeraCrypt accepts up to 64 characters without a keyfile; 48 random bytes
@@ -502,14 +502,17 @@ fn create_in_container(
     let (meta, container_password) = ContainerMeta::create(&secret, &config.kdf)?;
 
     veracrypt.create_volume(
-        &container,
-        size_bytes,
+        &NewVolume {
+            container: &container,
+            size_bytes,
+            keyfiles: &config.keyfiles,
+            pim: config.pim,
+            encryption: &config.encryption,
+            hash_algo: &config.hash_algo,
+            // A full format: the container is filled with random data first.
+            quick: false,
+        },
         &container_password,
-        &config.keyfiles,
-        config.pim,
-        &config.encryption,
-        &config.hash_algo,
-        false, // full format: fills the container with random data
     )?;
     // Write the sidecar before anything else can fail: without it the
     // container we just made would already be unopenable.

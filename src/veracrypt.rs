@@ -66,6 +66,29 @@ impl MountPoint {
     }
 }
 
+/// Everything VeraCrypt has to be told to make a volume.
+///
+/// Each field is a separate decision its command line demands, and each is
+/// required: there is no default to fall back on, so a volume cannot be asked
+/// for half-described. Named rather than passed in a row, because a row of
+/// nine arguments with four strings in it is one transposition away from a
+/// container made with the wrong cipher.
+#[derive(Clone, Copy, Debug)]
+pub struct NewVolume<'a> {
+    pub container: &'a Path,
+    pub size_bytes: u64,
+    pub keyfiles: &'a [PathBuf],
+    /// The number the volume will be mounted with. It used to be written as
+    /// zero whatever the settings said, so a volume made with a PIM
+    /// configured was created under one number, asked for under another, and
+    /// never opened.
+    pub pim: u32,
+    pub encryption: &'a str,
+    pub hash_algo: &'a str,
+    /// Skip filling the container with random data first.
+    pub quick: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct VeraCrypt {
     pub binary: Option<PathBuf>,
@@ -163,28 +186,7 @@ impl VeraCrypt {
     ///
     /// Refuses to touch an existing file: silently reformatting a container
     /// would destroy whatever was inside it.
-    ///
-    /// `pim` is the one the volume will be mounted with. It used to be
-    /// written as zero here whatever the settings said, so a volume made with
-    /// a PIM configured was created under one number and asked for under
-    /// another, and never opened.
-    ///
-    /// Nine arguments, and a struct to hold them would be worse: every one is
-    /// a distinct decision VeraCrypt's command line demands, and bundling them
-    /// would let a caller build a half-filled struct that only fails when the
-    /// process runs.
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_volume(
-        &self,
-        container: &Path,
-        size_bytes: u64,
-        password: &Secret,
-        keyfiles: &[PathBuf],
-        pim: u32,
-        encryption: &str,
-        hash_algo: &str,
-        quick: bool,
-    ) -> Result<()> {
+    pub fn create_volume(&self, volume: &NewVolume, password: &Secret) -> Result<()> {
         self.require()?;
         let format_binary = self
             .format_binary
@@ -194,6 +196,7 @@ impl VeraCrypt {
                 Error::veracrypt("\"VeraCrypt Format\" was not found next to VeraCrypt")
             })?;
 
+        let container = volume.container;
         if container.exists() {
             return Err(Error::veracrypt(format!(
                 "refusing to overwrite an existing file: {}",
@@ -210,24 +213,13 @@ impl VeraCrypt {
             let password_text = password
                 .expose_str()
                 .map_err(|_| Error::veracrypt("the password is not valid UTF-8"))?;
-            command.args(windows_create_args(
-                container,
-                size_bytes,
-                password_text,
-                keyfiles,
-                pim,
-                encryption,
-                hash_algo,
-                quick,
-            ));
+            command.args(windows_create_args(volume, password_text));
             let output = self.run(&mut command, Some(password), false)?;
             self.check_created(container, &output)
         }
         #[cfg(not(windows))]
         {
-            command.args(posix_create_args(
-                container, size_bytes, keyfiles, pim, encryption, hash_algo, quick,
-            ));
+            command.args(posix_create_args(volume));
             let output = self.run(&mut command, Some(password), true)?;
             self.check_created(container, &output)
         }
@@ -417,39 +409,30 @@ impl VeraCrypt {
 // box, a wrong `/size` makes a container of the wrong size.
 
 #[cfg(windows)]
-fn windows_create_args(
-    container: &Path,
-    size_bytes: u64,
-    password: &str,
-    keyfiles: &[PathBuf],
-    pim: u32,
-    encryption: &str,
-    hash_algo: &str,
-    quick: bool,
-) -> Vec<std::ffi::OsString> {
+fn windows_create_args(volume: &NewVolume, password: &str) -> Vec<std::ffi::OsString> {
     use std::ffi::OsString;
     let mut args: Vec<OsString> = vec![
         "/create".into(),
-        container.into(),
+        volume.container.into(),
         "/size".into(),
-        size_bytes.to_string().into(),
+        volume.size_bytes.to_string().into(),
         "/password".into(),
         password.into(),
         "/encryption".into(),
-        encryption.into(),
+        volume.encryption.into(),
         "/hash".into(),
-        hash_algo.into(),
+        volume.hash_algo.into(),
         "/filesystem".into(),
         "NTFS".into(),
         "/pim".into(),
-        pim.to_string().into(),
+        volume.pim.to_string().into(),
         "/force".into(),
         "/silent".into(),
     ];
-    if quick {
+    if volume.quick {
         args.push("/quick".into());
     }
-    for keyfile in keyfiles {
+    for keyfile in volume.keyfiles {
         args.push("/keyfile".into());
         args.push(keyfile.into());
     }
@@ -494,41 +477,33 @@ fn windows_mount_args(
 }
 
 #[cfg(not(windows))]
-fn posix_create_args(
-    container: &Path,
-    size_bytes: u64,
-    keyfiles: &[PathBuf],
-    pim: u32,
-    encryption: &str,
-    hash_algo: &str,
-    quick: bool,
-) -> Vec<std::ffi::OsString> {
+fn posix_create_args(volume: &NewVolume) -> Vec<std::ffi::OsString> {
     use std::ffi::OsString;
     let mut args: Vec<OsString> = vec![
         "--text".into(),
         "--create".into(),
-        container.into(),
+        volume.container.into(),
         "--size".into(),
-        size_bytes.to_string().into(),
+        volume.size_bytes.to_string().into(),
         "--encryption".into(),
-        encryption.into(),
+        volume.encryption.into(),
         "--hash".into(),
-        hash_algo.into(),
+        volume.hash_algo.into(),
         "--filesystem".into(),
         "FAT".into(),
         "--volume-type".into(),
         "normal".into(),
         "--pim".into(),
-        pim.to_string().into(),
+        volume.pim.to_string().into(),
         "--random-source".into(),
         "/dev/urandom".into(),
         "--keyfiles".into(),
-        join_keyfiles(keyfiles).into(),
+        join_keyfiles(volume.keyfiles).into(),
         // The password arrives on stdin, never on the command line.
         "--stdin".into(),
         "--non-interactive".into(),
     ];
-    if quick {
+    if volume.quick {
         args.push("--quick".into());
     }
     args
@@ -631,6 +606,19 @@ mod tests {
         args.windows(2).any(|w| w[0] == flag && w[1] == value)
     }
 
+    /// A small volume at `container`, for a test to vary.
+    fn a_volume(container: &Path) -> NewVolume<'_> {
+        NewVolume {
+            container,
+            size_bytes: 1024 * 1024,
+            keyfiles: &[],
+            pim: 0,
+            encryption: "AES",
+            hash_algo: "sha512",
+            quick: false,
+        }
+    }
+
     #[test]
     fn a_missing_binary_gives_advice_not_a_bare_failure() {
         let absent = VeraCrypt {
@@ -655,16 +643,7 @@ mod tests {
             format_binary: Some(existing.clone()),
         };
         let err = veracrypt
-            .create_volume(
-                &existing,
-                1024 * 1024,
-                &Secret::from_str("pw"),
-                &[],
-                0,
-                "AES",
-                "sha512",
-                false,
-            )
+            .create_volume(&a_volume(&existing), &Secret::from_str("pw"))
             .unwrap_err();
         assert!(err.to_string().contains("refusing to overwrite"));
         // ...and the file is untouched.
@@ -733,16 +712,13 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_windows_create_line_carries_size_and_cipher() {
-        let args = strings(&windows_create_args(
-            Path::new(r"C:\v.hc"),
-            64 * 1024 * 1024,
-            "pw",
-            &[],
-            485,
-            "AES(Twofish(Serpent))",
-            "sha512",
-            false,
-        ));
+        let volume = NewVolume {
+            size_bytes: 64 * 1024 * 1024,
+            pim: 485,
+            encryption: "AES(Twofish(Serpent))",
+            ..a_volume(Path::new(r"C:\v.hc"))
+        };
+        let args = strings(&windows_create_args(&volume, "pw"));
         // The same number the mount line carries, or the volume never opens.
         assert!(has_pair(&args, "/pim", "485"));
         assert!(has_pair(&args, "/size", "67108864"));
@@ -769,15 +745,7 @@ mod tests {
         assert!(mount.contains(&"--non-interactive".to_string()));
         assert!(!mount.iter().any(|a| a.contains("password")));
 
-        let create = strings(&posix_create_args(
-            Path::new("/vaults/v.hc"),
-            1024,
-            &[],
-            0,
-            "AES",
-            "sha512",
-            false,
-        ));
+        let create = strings(&posix_create_args(&a_volume(Path::new("/vaults/v.hc"))));
         assert!(create.contains(&"--stdin".to_string()));
         assert!(!create.iter().any(|a| a.contains("password")));
     }
