@@ -143,7 +143,7 @@ auto-lock on idle and on screen lock, and a clipboard that clears itself.
 ## How it is verified
 
 ```bash
-cargo test            # 407 tests, about four minutes
+cargo test            # 416 tests, about four minutes
 cargo build --release # or build.ps1, which also records the fingerprint
 ```
 
@@ -160,7 +160,7 @@ what it may not do is bring the process down on a length the file supplied. Arou
 two-of-two split of one byte, one piece plus every possible partner yields every
 possible secret exactly once.
 
-Nine tests beyond those 407, in `ui/snapshots.rs`, draw the real screens — the lock
+Nine tests beyond those 416, in `ui/snapshots.rs`, draw the real screens — the lock
 screen and its backups, the older-file prompt in each of its three forms, settings
 sections — with egui's own test harness, through wgpu on WARP, the software Direct3D 12
 adapter every Windows runner has. CI keeps the pictures for a person to look at, and

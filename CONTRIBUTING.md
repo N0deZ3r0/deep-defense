@@ -34,7 +34,7 @@ If it is a vulnerability rather than a bug, do not open an issue at all: see
 ## Running it
 
 ```bash
-cargo test            # 407 tests, about four minutes
+cargo test            # 416 tests, about four minutes
 cargo build --release
 ```
 
@@ -76,6 +76,13 @@ of one, should get a test there.
 - **Both languages or neither.** Every user-visible string lives in `src/i18n.rs` in English
   and Russian, and a test fails if the two disagree about how many substitutions a template
   takes.
+- **An error a person can run into is a `Refusal`.** Not `Error::vault("…")` with an English
+  sentence in it: a variant of `errors::Refusal`, with its sentence in both languages. The
+  stringly variants are for detail handed up from a library or a damaged file.
+- **A change to the vault goes through `Vault::commit`.** It saves the change or takes it
+  back, so what is on screen is never something that exists only in memory. Changing
+  `vault.data` and calling `save()` by hand is how an entry ends up deleted on screen and
+  present on disk.
 - **Every control needs a name.** The field helpers take the spoken name as a required
   argument and a test walks the accessibility tree; a control announced as nothing is a
   defect nobody sighted will ever notice.
@@ -115,7 +122,7 @@ Argon2id, AES-256-GCM, XChaCha20-Poly1305, HKDF, схема Шамира над 
 ## Как запустить
 
 ```bash
-cargo test            # 407 тестов, около четырёх минут
+cargo test            # 416 тестов, около четырёх минут
 cargo build --release
 ```
 
@@ -155,6 +162,13 @@ cargo test --lib --features ui-snapshots ui::snapshots -- --test-threads=1
   `Debug` рано или поздно положит мастер-пароль в сообщение об ошибке.
 - **Оба языка или ни одного.** Каждая видимая строка живёт в `src/i18n.rs` на английском и
   русском, и тест падает, если в шаблонах разное число подстановок.
+- **Ошибка, с которой может столкнуться человек, — это `Refusal`.** Не `Error::vault("…")`
+  с английской фразой внутри, а вариант `errors::Refusal` с фразой на обоих языках.
+  Строковые варианты — для подробностей от библиотеки или из повреждённого файла.
+- **Изменение хранилища идёт через `Vault::commit`.** Он сохраняет изменение или
+  возвращает всё как было, поэтому на экране не бывает того, что есть только в памяти.
+  Менять `vault.data` и звать `save()` вручную — так запись и оказывается удалённой на
+  экране и целой на диске.
 - **У каждого элемента должно быть имя.** Помощники полей принимают произносимое имя
   обязательным аргументом, а тест обходит дерево доступности: элемент, который диктор
   читает как ничто, — дефект, которого никто зрячий не заметит.
