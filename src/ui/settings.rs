@@ -1499,21 +1499,26 @@ fn verify_recovery_panel(
         app.settings.recovery_verify_result = None;
     }
 
-    let found = crate::shamir::parse_shares(&app.settings.recovery_verify);
+    let (found, strays) =
+        crate::shamir::first_set(crate::shamir::parse_shares(&app.settings.recovery_verify));
+    let enough = found
+        .first()
+        .is_some_and(|first| found.len() >= first.threshold() as usize);
     ui.add_space(theme::space::SM);
-    if !found.is_empty() {
-        let needed = found[0].threshold();
+    if let Some(first) = found.first() {
         widgets::status_chip(
             ui,
             Icon::Info,
-            &fill2(strings.recovery.unlock_found, found.len(), needed),
+            &fill2(strings.recovery.unlock_found, found.len(), first.threshold()),
             palette.accent,
         );
+        if strays > 0 {
+            widgets::error_text(ui, palette, strings.refusals.pieces_from_different_sets);
+        }
         ui.add_space(theme::space::SM);
     }
 
     ui.horizontal(|ui| {
-        let enough = !found.is_empty() && found.len() >= found[0].threshold() as usize;
         if widgets::primary_button(ui, palette, strings.recovery.verify_button, enough)
             .clicked()
         {

@@ -219,27 +219,29 @@ fn recovery_panel(app: &mut App, ui: &mut egui::Ui, palette: &Palette, strings: 
         // Counting as they paste turns "it did not work" into "you have two of
         // the three you need", which is the difference between giving up and
         // going to fetch another piece.
-        let found = crate::shamir::parse_shares(&app.recovery_input);
+        let (found, strays) =
+            crate::shamir::first_set(crate::shamir::parse_shares(&app.recovery_input));
+        let enough = found
+            .first()
+            .is_some_and(|first| found.len() >= first.threshold() as usize);
         ui.add_space(theme::space::SM);
-        if found.is_empty() {
-            if !app.recovery_input.trim().is_empty() {
-                widgets::error_text(ui, palette, strings.recovery.unlock_none);
-            }
-        } else {
-            let needed = found[0].threshold();
-            let enough = found.len() >= needed as usize;
+        if let Some(first) = found.first() {
             widgets::status_chip(
                 ui,
                 if enough { Icon::Check } else { Icon::Info },
-                &fill2(strings.recovery.unlock_found, found.len(), needed),
+                &fill2(strings.recovery.unlock_found, found.len(), first.threshold()),
                 if enough { palette.success } else { palette.accent },
             );
+            if strays > 0 {
+                widgets::error_text(ui, palette, strings.refusals.pieces_from_different_sets);
+            }
+        } else if !app.recovery_input.trim().is_empty() {
+            widgets::error_text(ui, palette, strings.recovery.unlock_none);
         }
 
         ui.add_space(theme::space::MD);
         ui.horizontal(|ui| {
-            let ready = !found.is_empty() && found.len() >= found[0].threshold() as usize;
-            if widgets::primary_button(ui, palette, strings.recovery.unlock_rebuild, ready)
+            if widgets::primary_button(ui, palette, strings.recovery.unlock_rebuild, enough)
                 .clicked()
             {
                 rebuild_password(app, &found);

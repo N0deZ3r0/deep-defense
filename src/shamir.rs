@@ -144,6 +144,13 @@ impl Share {
         self.threshold
     }
 
+    /// Whether `other` was cut from the same secret at the same time.
+    pub fn same_set(&self, other: &Share) -> bool {
+        self.set_id == other.set_id
+            && self.threshold == other.threshold
+            && self.version == other.version
+    }
+
     /// Identifies the set this share came from, for telling the user which
     /// pile a stray card belongs to.
     pub fn set_label(&self) -> String {
@@ -319,10 +326,7 @@ pub fn combine(shares: &[Share]) -> Result<Zeroizing<Vec<u8>>> {
     let length = first.data.len();
 
     for share in shares {
-        let same_set = share.set_id == first.set_id
-            && share.threshold == first.threshold
-            && share.version == first.version;
-        if !same_set {
+        if !share.same_set(first) {
             return Err(Refusal::PiecesFromDifferentSets.into());
         }
         // One set, and yet a length or an index no piece of it could have.
@@ -430,6 +434,25 @@ pub fn parse_shares(text: &str) -> Vec<Share> {
     found
 }
 
+/// The pieces that belong with the first one, and how many do not.
+///
+/// A drawer of recovery cards can hold more than one set. Counted together,
+/// two pieces of two different sets looked like the two that were needed, and
+/// then refused to combine; counted apart, the screen can say how many of the
+/// set in hand are still missing.
+pub fn first_set(shares: Vec<Share>) -> (Vec<Share>, usize) {
+    let Some(first) = shares.first().cloned() else {
+        return (shares, 0);
+    };
+    let pasted = shares.len();
+    let set: Vec<Share> = shares
+        .into_iter()
+        .filter(|share| share.same_set(&first))
+        .collect();
+    let strays = pasted - set.len();
+    (set, strays)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +489,19 @@ mod tests {
         let found = parse_shares(&pasted);
         assert_eq!(found.len(), 2, "one wrapped, one on a line of its own");
         assert_eq!(combine(&found).unwrap().as_slice(), SECRET);
+    }
+
+    #[test]
+    fn pieces_of_another_set_are_counted_apart() {
+        let ours = split(SECRET, 2, 3).unwrap();
+        let theirs = split(b"another password", 2, 3).unwrap();
+        let pasted = vec![ours[0].clone(), theirs[0].clone(), ours[2].clone()];
+
+        let (set, strays) = first_set(pasted);
+        assert_eq!((set.len(), strays), (2, 1));
+        assert_eq!(combine(&set).unwrap().as_slice(), SECRET);
+
+        assert_eq!(first_set(Vec::new()).1, 0);
     }
 
     #[test]
